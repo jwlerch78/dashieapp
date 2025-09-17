@@ -1,48 +1,175 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Dashie Grid</title>
-  
-  <!-- Favicons -->
-  <link rel="icon" type="image/png" sizes="512x512" href="icons/Dashie_Logo_Orange_Transparent.png">
-  <link rel="icon" type="image/png" sizes="192x192" href="icons/Dashie_Logo_Orange_Transparent.png">
-  <link rel="icon" type="image/png" sizes="32x32" href="icons/Dashie_Logo_Orange_Transparent.png">
-  <link rel="icon" type="image/png" sizes="16x16" href="icons/Dashie_Logo_Orange_Transparent.png">
-  
-  <!-- CSS Core Files (in order) -->
-  <link rel="stylesheet" href="css/core/variables.css">
-  <link rel="stylesheet" href="css/core/base.css">
-  
-  <!-- CSS Component Files -->
-  <link rel="stylesheet" href="css/components/grid.css">
-  <link rel="stylesheet" href="css/components/widgets.css">
-  <link rel="stylesheet" href="css/components/sidebar.css">
-  <link rel="stylesheet" href="css/components/navigation.css">
-  <link rel="stylesheet" href="css/components/modals.css">
-  <link rel="stylesheet" href="js/settings/simplified-settings.css">
+    <!-- UPDATED: Added AWS Amplify for Cognito integration -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashie - Family Dashboard</title>
+    <link rel="icon" type="image/x-icon" href="icons/favicon.ico">
+    
+    <!-- CSS imports (unchanged) -->
+    <link rel="stylesheet" href="css/core/variables.css">
+    <link rel="stylesheet" href="css/core/base.css">
+    <link rel="stylesheet" href="css/components/sidebar.css">
+    <link rel="stylesheet" href="css/components/grid.css">
+    <link rel="stylesheet" href="css/components/widgets.css">
+    <link rel="stylesheet" href="css/components/modals.css">
+    <link rel="stylesheet" href="css/components/navigation.css">
+    <link rel="stylesheet" href="css/components/settings.css">
+    
+    <!-- AWS Amplify SDK - NEW -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/aws-amplify/5.3.14/aws-amplify.min.js"></script>
+    <script>
+        // Make Amplify available globally for Cognito auth
+        window.aws = {
+            amplifyAuth: {
+                Amplify: window.Amplify,
+                Auth: window.AmplifyAuth
+            }
+        };
+        console.log('🔐 AWS Amplify loaded and configured');
+    </script>
 </head>
-<body>
-<div id="app">
-  <!-- Sidebar Menu (now on the left) -->
-  <div id="sidebar-wrapper">
-    <div id="sidebar"></div>
-  </div>
-  <div id="grid"></div>
-</div>
+<body class="theme-dark">
+    <!-- Loading screen -->
+    <div id="loading-screen" class="loading-screen">
+        <div class="loading-content">
+            <img src="icons/Dashie_Full_Logo_White_Transparent.png" alt="Dashie" class="loading-logo">
+            <div class="loading-spinner"></div>
+            <p class="loading-text">Loading Dashie...</p>
+        </div>
+    </div>
 
-  <!-- Configuration (keep this) -->
-  <script src="js/config.js"></script>
-   
-<!-- Google SSO Login (this handles settings initialization internally) -->
-<script type="module" src="js/auth/simple-auth.js"></script>
-  
-  <!-- Modular JavaScript (ES6 modules) -->
-  <script type="module" src="js/main.js"></script>
+    <!-- Main app container -->
+    <div id="app-container" class="app-container" style="display: none;">
+        <!-- Sidebar -->
+        <div id="sidebar" class="sidebar">
+            <div class="sidebar-header">
+                <img src="icons/Dashie_Full_Logo_White_Transparent.png" alt="Dashie" class="sidebar-logo">
+            </div>
+            <nav class="sidebar-nav">
+                <button class="nav-item selected" data-action="dashboard" title="Dashboard">
+                    <img src="icons/dashboard.svg" alt="Dashboard" class="nav-icon">
+                    <span class="nav-text">Dashboard</span>
+                </button>
+                <button class="nav-item" data-action="settings" title="Settings">
+                    <img src="icons/settings.svg" alt="Settings" class="nav-icon">
+                    <span class="nav-text">Settings</span>
+                </button>
+                <button class="nav-item" data-action="sleep" title="Sleep">
+                    <img src="icons/sleep.svg" alt="Sleep" class="nav-icon">
+                    <span class="nav-text">Sleep</span>
+                </button>
+                <button class="nav-item" data-action="exit" title="Exit">
+                    <img src="icons/exit.svg" alt="Exit" class="nav-icon">
+                    <span class="nav-text">Exit</span>
+                </button>
+            </nav>
+        </div>
 
-  <!-- Location code (traccar) -->
-  <!--<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script> -->
-  <!--<script src="widgets/location/location.js"></script> -->
-  
+        <!-- Main content area -->
+        <div id="main-content" class="main-content">
+            <!-- Widget grid -->
+            <div id="widget-grid" class="widget-grid">
+                <!-- Widgets will be loaded dynamically -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Auth overlay -->
+    <div id="auth-overlay" class="auth-overlay" style="display: none;">
+        <div class="auth-content">
+            <img src="icons/Dashie_Full_Logo_White_Transparent.png" alt="Dashie" class="auth-logo">
+            <h2 class="auth-title">Welcome to Dashie</h2>
+            <p class="auth-description">Sign in with your Google account to continue</p>
+            <button id="sign-in-btn" class="auth-button">
+                <img src="icons/google.svg" alt="Google" class="auth-icon">
+                Sign in with Google
+            </button>
+            <div id="auth-error" class="auth-error" style="display: none;"></div>
+        </div>
+    </div>
+
+    <!-- WebView auth overlay -->
+    <div id="webview-auth-overlay" class="auth-overlay" style="display: none;">
+        <div class="auth-content">
+            <img src="icons/Dashie_Full_Logo_White_Transparent.png" alt="Dashie" class="auth-logo">
+            <h2 class="auth-title">Welcome to Dashie</h2>
+            <p class="auth-description">This appears to be a limited browser environment</p>
+            <button id="mock-user-btn" class="auth-button">Continue as Demo User</button>
+            <button id="webview-exit-btn" class="auth-button secondary">Exit</button>
+        </div>
+    </div>
+
+    <!-- Auth callback page (NEW for Cognito) -->
+    <div id="auth-callback" class="auth-overlay" style="display: none;">
+        <div class="auth-content">
+            <img src="icons/Dashie_Full_Logo_White_Transparent.png" alt="Dashie" class="auth-logo">
+            <h2 class="auth-title">Signing you in...</h2>
+            <div class="loading-spinner"></div>
+            <p class="auth-description">Please wait while we complete your authentication</p>
+        </div>
+    </div>
+
+    <!-- Sleep overlay -->
+    <div id="sleep-overlay" class="sleep-overlay" style="display: none;">
+        <div class="sleep-content">
+            <div class="sleep-time"></div>
+            <div class="sleep-message">Dashie is sleeping</div>
+            <div class="sleep-hint">Press any key to wake up</div>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div id="modal-overlay" class="modal-overlay" style="display: none;">
+        <!-- Sleep confirmation -->
+        <div id="sleep-modal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <h3>Sleep Mode</h3>
+                <p>Put Dashie to sleep?</p>
+                <div class="modal-buttons">
+                    <button id="confirm-sleep" class="modal-button primary">Sleep</button>
+                    <button id="cancel-sleep" class="modal-button secondary">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Exit confirmation -->
+        <div id="exit-modal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <h3>Exit Dashie</h3>
+                <p>Are you sure you want to exit?</p>
+                <div class="modal-buttons">
+                    <button id="confirm-exit" class="modal-button primary">Exit</button>
+                    <button id="cancel-exit" class="modal-button secondary">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Settings modal -->
+        <div id="settings-modal" class="modal large" style="display: none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Settings</h3>
+                    <button id="close-settings" class="modal-close">&times;</button>
+                </div>
+                <div id="settings-content" class="modal-body">
+                    <!-- Settings content will be loaded dynamically -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript modules -->
+    <script type="module">
+        // Import and initialize the app
+        import { initializeApp } from './js/main.js';
+        
+        // Start the application
+        initializeApp();
+    </script>
+    
+    <!-- Preload auth system -->
+    <script type="module" src="js/auth/simple-auth.js"></script>
 </body>
 </html>

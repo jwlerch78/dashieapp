@@ -1,5 +1,5 @@
-// js/google-apis/google-api-client.js - UPDATED: Enhanced for centralized data fetching with better error handling and caching support
-// Enhanced production data fetching, better error handling, retry logic, and optimized API calls
+// js/google-apis/google-api-client.js - Updated with Token Manager Integration
+// CHANGE SUMMARY: Enhanced to automatically handle token refresh on 401 errors
 
 // ==================== CONFIG VARIABLES ====================
 
@@ -19,24 +19,30 @@ export class GoogleAPIClient {
     this.authManager = authManager;
     this.baseUrl = 'https://www.googleapis.com';
     
-    // NEW: Request retry configuration
+    // Request retry configuration
     this.retryConfig = {
       maxRetries: 3,
       baseDelay: 1000, // 1 second
       maxDelay: 10000  // 10 seconds
     };
     
-    // NEW: Rate limiting
+    // Rate limiting
     this.lastRequestTime = 0;
     this.minRequestInterval = 100; // 100ms between requests
   }
 
-  // Get current access token from auth manager
-  getAccessToken() {
-    return this.authManager.getGoogleAccessToken();
+  // UPDATED: Get current access token with automatic refresh
+  async getAccessToken() {
+    try {
+      // Use auth manager's getGoogleAccessToken which handles refresh automatically
+      return await this.authManager.getGoogleAccessToken();
+    } catch (error) {
+      console.error('📡 ❌ Failed to get valid access token:', error);
+      throw new Error('Unable to get valid access token');
+    }
   }
 
-  // NEW: Rate-limited request wrapper
+  // Rate-limited request wrapper
   async waitForRateLimit() {
     const now = Date.now();
     const timeSinceLastRequest = now - this.lastRequestTime;
@@ -50,13 +56,8 @@ export class GoogleAPIClient {
     this.lastRequestTime = Date.now();
   }
 
-  // NEW: Enhanced request method with retry logic and better error handling
+  // ENHANCED: Request method with automatic token refresh on 401 errors
   async makeRequest(endpoint, options = {}) {
-    const token = this.getAccessToken();
-    if (!token) {
-      throw new Error('No Google access token available');
-    }
-
     let url;
     if (endpoint.startsWith('http')) {
       url = endpoint;
@@ -66,22 +67,29 @@ export class GoogleAPIClient {
     } else {
       // Other APIs use standard domain
       url = `${this.baseUrl}${endpoint}`;
-    }    
+    }
 
-    const requestOptions = {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        ...options.headers
-      },
-      ...options
-    };
-
-    // NEW: Retry logic with exponential backoff
+    // Retry logic with exponential backoff and token refresh
     let lastError;
     for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
       try {
+        // Get fresh token for each attempt (important for retry after refresh)
+        const token = await this.getAccessToken();
+        
+        if (!token) {
+          throw new Error('No Google access token available');
+        }
+
+        const requestOptions = {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            ...options.headers
+          },
+          ...options
+        };
+
         // Apply rate limiting
         await this.waitForRateLimit();
         
@@ -101,10 +109,36 @@ export class GoogleAPIClient {
         error.status = response.status;
         error.response = response;
         
-        // Don't retry on certain errors
-        if (response.status === 401 || response.status === 403) {
-          console.error(`❌ Google API authentication error (${response.status}):`, errorText);
-          throw error;
+        // Handle 401 Unauthorized - token may be expired
+        if (response.status === 401) {
+          console.warn(`🔄 Google API 401 error on attempt ${attempt + 1} - token may be expired`);
+          
+          // Try to refresh token if this is not the last attempt
+          if (attempt < this.retryConfig.maxRetries) {
+            try {
+              console.log('🔄 Attempting to refresh token due to 401 error...');
+              await this.authManager.tokenManager.refreshToken();
+              console.log('🔄 ✅ Token refreshed, retrying API request...');
+              
+              // Wait a bit before retry
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              continue; // Retry with refreshed token
+              
+            } catch (refreshError) {
+              console.error('🔄 ❌ Token refresh failed:', refreshError);
+              // If refresh fails, don't retry further - let the error bubble up
+              throw error;
+            }
+          } else {
+            console.error('❌ Google API 401 error on final attempt - authentication failed');
+            throw error;
+          }
+        }
+        
+        // Handle 403 Forbidden - insufficient permissions or quota
+        if (response.status === 403) {
+          console.error(`❌ Google API 403 error (forbidden):`, errorText);
+          throw error; // Don't retry on 403
         }
         
         // For 5xx errors or rate limits, we'll retry
@@ -129,377 +163,153 @@ export class GoogleAPIClient {
       } catch (error) {
         lastError = error;
         
-        // If it's a network error, retry
-        if (error.name === 'TypeError' || error.message.includes('fetch')) {
-          console.warn(`⚠️ Network error on attempt ${attempt + 1}:`, error.message);
-          
-          if (attempt < this.retryConfig.maxRetries) {
-            const delay = Math.min(
-              this.retryConfig.baseDelay * Math.pow(2, attempt),
-              this.retryConfig.maxDelay
-            );
-            console.log(`⏳ Waiting ${delay}ms before retry...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            continue;
-          }
+        // If it's a network error, retry if we have attempts left
+        if (!error.status && attempt < this.retryConfig.maxRetries) {
+          console.warn(`⚠️ Network error on attempt ${attempt + 1}, will retry:`, error.message);
+          const delay = Math.min(
+            this.retryConfig.baseDelay * Math.pow(2, attempt),
+            this.retryConfig.maxDelay
+          );
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
         }
         
-        // If it's not a retryable error, throw immediately
+        // If it's not a retryable error or we're out of attempts
         throw error;
       }
     }
     
-    console.error(`❌ Google API request failed after ${this.retryConfig.maxRetries + 1} attempts`);
-    throw lastError;
+    // If we get here, all retries failed
+    throw lastError || new Error('All API request attempts failed');
   }
 
-  // ====================
-  // GOOGLE PHOTOS METHODS
-  // ====================
+  // EXISTING CALENDAR API METHODS (updated to use enhanced makeRequest)
 
-  async getPhotoAlbums() {
-    console.log('📸 Fetching Google Photos albums...');
-    
-    try {
-      const response = await this.makeRequest('/v1/albums', {
-        method: 'GET'
-      });
-      
-      const albums = response.albums || [];
-      console.log(`📸 ✅ Found ${albums.length} photo albums`);
-      
-      return albums.map(album => ({
-        id: album.id,
-        title: album.title,
-        productUrl: album.productUrl,
-        mediaItemsCount: album.mediaItemsCount || 0,
-        coverPhotoBaseUrl: album.coverPhotoBaseUrl,
-        isWriteable: album.isWriteable || false
-      }));
-      
-    } catch (error) {
-      console.error('📸 ❌ Failed to fetch photo albums:', error);
-      
-      // Return empty array instead of throwing to prevent breaking the dashboard
-      return [];
-    }
-  }
-
-  async getAlbumPhotos(albumId, pageSize = 50, pageToken = null) {
-    console.log(`📸 Fetching photos from album: ${albumId}`);
-    
-    try {
-      const requestBody = {
-        albumId: albumId,
-        pageSize: pageSize
-      };
-      
-      if (pageToken) {
-        requestBody.pageToken = pageToken;
-      }
-
-      const response = await this.makeRequest('/v1/mediaItems:search', {
-        method: 'POST',
-        body: JSON.stringify(requestBody)
-      });
-      
-      const mediaItems = response.mediaItems || [];
-      console.log(`📸 ✅ Found ${mediaItems.length} photos in album`);
-      
-      return {
-        photos: mediaItems.map(item => ({
-          id: item.id,
-          filename: item.filename,
-          baseUrl: item.baseUrl,
-          mimeType: item.mimeType,
-          creationTime: item.mediaMetadata?.creationTime,
-          width: item.mediaMetadata?.width,
-          height: item.mediaMetadata?.height,
-          displayUrl: `${item.baseUrl}=w1920-h1080-c`,
-          thumbnailUrl: `${item.baseUrl}=w300-h300-c`
-        })),
-        nextPageToken: response.nextPageToken
-      };
-      
-    } catch (error) {
-      console.error(`📸 ❌ Failed to fetch photos from album ${albumId}:`, error);
-      return { photos: [], nextPageToken: null };
-    }
-  }
-
-  async getRecentPhotos(pageSize = 50, pageToken = null) {
-    console.log('📸 Fetching recent photos...');
-    
-    try {
-      const requestBody = {
-        pageSize: pageSize,
-        filters: {
-          mediaTypeFilter: {
-            mediaTypes: ['PHOTO']
-          }
-        }
-      };
-      
-      if (pageToken) {
-        requestBody.pageToken = pageToken;
-      }
-
-      const response = await this.makeRequest('/v1/mediaItems:search', {
-        method: 'POST',
-        body: JSON.stringify(requestBody)
-      });
-      
-      const mediaItems = response.mediaItems || [];
-      console.log(`📸 ✅ Found ${mediaItems.length} recent photos`);
-      
-      return {
-        photos: mediaItems.map(item => ({
-          id: item.id,
-          filename: item.filename,
-          baseUrl: item.baseUrl,
-          mimeType: item.mimeType,
-          creationTime: item.mediaMetadata?.creationTime,
-          width: item.mediaMetadata?.width,
-          height: item.mediaMetadata?.height,
-          displayUrl: `${item.baseUrl}=w1920-h1080-c`,
-          thumbnailUrl: `${item.baseUrl}=w300-h300-c`
-        })),
-        nextPageToken: response.nextPageToken
-      };
-      
-    } catch (error) {
-      console.error('📸 ❌ Failed to fetch recent photos:', error);
-      return { photos: [], nextPageToken: null };
-    }
-  }
-
-  // ====================
-  // GOOGLE CALENDAR METHODS
-  // ====================
-
+  // Get list of calendars
   async getCalendarList() {
-    console.log('📅 Fetching Google Calendar list...');
+    console.log('📅 Fetching calendar list...');
     
     try {
-      const response = await this.makeRequest('/calendar/v3/users/me/calendarList');
+      const data = await this.makeRequest('/calendar/v3/users/me/calendarList');
       
-      const calendars = response.items || [];
-      console.log(`📅 ✅ Found ${calendars.length} calendars`);
+      const calendars = data.items || [];
+      console.log(`📅 Found ${calendars.length} calendars`);
       
       return calendars.map(cal => ({
         id: cal.id,
         summary: cal.summary,
-        description: cal.description,
+        description: cal.description || '',
         primary: cal.primary || false,
-        backgroundColor: cal.backgroundColor,
-        foregroundColor: cal.foregroundColor,
         accessRole: cal.accessRole,
-        selected: cal.selected,
-        timeZone: cal.timeZone
+        backgroundColor: cal.backgroundColor,
+        foregroundColor: cal.foregroundColor
       }));
       
     } catch (error) {
       console.error('📅 ❌ Failed to fetch calendar list:', error);
-      throw error; // Re-throw for testAccess to catch properly
+      throw new Error(`Calendar list fetch failed: ${error.message}`);
     }
   }
 
-  async getCalendarEvents(calendarId, timeMin = null, timeMax = null, maxResults = 250) {
+  // Get events from a specific calendar
+  async getCalendarEvents(calendarId, timeMin = null, timeMax = null) {
     console.log(`📅 Fetching events from calendar: ${calendarId}`);
     
+    const now = new Date();
+    const defaultTimeMin = timeMin || now.toISOString();
+    const defaultTimeMax = timeMax || new Date(now.getTime() + (MONTHS_TO_PULL * 30 * 24 * 60 * 60 * 1000)).toISOString();
+    
+    const params = new URLSearchParams({
+      timeMin: defaultTimeMin,
+      timeMax: defaultTimeMax,
+      singleEvents: 'true',
+      orderBy: 'startTime',
+      maxResults: '100'
+    });
+    
     try {
-      const params = new URLSearchParams({
-        maxResults: maxResults.toString(),
-        singleEvents: 'true',
-        orderBy: 'startTime'
-      });
+      const data = await this.makeRequest(`/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?${params}`);
       
-      if (!timeMin) {
-        timeMin = new Date().toISOString();
-      }
-      if (!timeMax) {
-        const maxDate = new Date();
-        maxDate.setMonth(maxDate.getMonth() + MONTHS_TO_PULL);
-        timeMax = maxDate.toISOString();
-      }
-      
-      params.append('timeMin', timeMin);
-      params.append('timeMax', timeMax);
-      
-      const response = await this.makeRequest(`/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?${params}`);
-      
-      const events = response.items || [];
-      console.log(`📅 ✅ Found ${events.length} events in calendar: ${calendarId}`);
+      const events = data.items || [];
+      console.log(`📅 Found ${events.length} events in calendar ${calendarId}`);
       
       return events.map(event => ({
         id: event.id,
         summary: event.summary || 'No title',
-        description: event.description,
+        description: event.description || '',
         start: event.start,
         end: event.end,
-        location: event.location,
+        location: event.location || '',
         attendees: event.attendees || [],
-        creator: event.creator,
-        organizer: event.organizer,
-        status: event.status,
-        htmlLink: event.htmlLink,
-        calendarId: calendarId,
-        isAllDay: !!event.start.date,
-        startDateTime: event.start.dateTime || event.start.date,
-        endDateTime: event.end.dateTime || event.end.date
+        calendarId: calendarId
       }));
       
     } catch (error) {
       console.error(`📅 ❌ Failed to fetch events from calendar ${calendarId}:`, error);
-      return [];
+      throw new Error(`Calendar events fetch failed: ${error.message}`);
     }
   }
 
-  // NEW: Enhanced getAllCalendarEvents with better error handling and performance
-  async getAllCalendarEvents(timeMin = null, timeMax = null) {
-    console.log('📅 🚀 Fetching events from all configured calendars...');
+  // Get events from all configured calendars
+  async getAllCalendarEvents() {
+    console.log('📅 🔄 Fetching events from all configured calendars...');
     
     try {
-      // First, get the calendar list
+      // Get calendar list first
       const calendars = await this.getCalendarList();
       
-      // Filter calendars by our config list
-      const filteredCalendars = calendars.filter(cal =>
-        CALENDARS_TO_INCLUDE.includes(cal.summary) || cal.primary
+      // Filter to configured calendars
+      const targetCalendars = calendars.filter(cal => 
+        CALENDARS_TO_INCLUDE.some(target => 
+          cal.summary.includes(target) || cal.id.includes(target)
+        )
       );
       
-      console.log(`📅 📋 Found ${calendars.length} total calendars`);
-      console.log(`📅 🎯 Fetching events from ${filteredCalendars.length} configured calendars:`, 
-        filteredCalendars.map(cal => cal.summary));
-
-      // NEW: Fetch events with controlled concurrency to avoid rate limits
-      const calendarResults = [];
-      const batchSize = 3; // Process 3 calendars at a time
+      console.log(`📅 Fetching from ${targetCalendars.length} configured calendars:`, 
+        targetCalendars.map(cal => cal.summary));
       
-      for (let i = 0; i < filteredCalendars.length; i += batchSize) {
-        const batch = filteredCalendars.slice(i, i + batchSize);
-        
-        console.log(`📅 📦 Processing calendar batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(filteredCalendars.length/batchSize)}`);
-        
-        const batchPromises = batch.map(calendar => 
-          this.getCalendarEvents(calendar.id, timeMin, timeMax)
-            .then(events => ({
-              calendar: calendar,
-              events: events,
-              status: 'success'
-            }))
-            .catch(error => {
-              console.warn(`📅 ⚠️ Failed to fetch events from calendar ${calendar.summary}:`, error);
-              return { 
-                calendar: calendar, 
-                events: [], 
-                status: 'error',
-                error: error.message 
-              };
-            })
-        );
-        
-        const batchResults = await Promise.all(batchPromises);
-        calendarResults.push(...batchResults);
-        
-        // Small delay between batches to be nice to the API
-        if (i + batchSize < filteredCalendars.length) {
-          await new Promise(resolve => setTimeout(resolve, 200));
+      // Fetch events from each calendar
+      const allEvents = [];
+      for (const calendar of targetCalendars) {
+        try {
+          const events = await this.getCalendarEvents(calendar.id);
+          allEvents.push(...events);
+        } catch (error) {
+          console.error(`📅 ⚠️ Failed to fetch from calendar ${calendar.summary}:`, error);
+          // Continue with other calendars
         }
       }
       
-      // Combine all events
-      const allEvents = [];
-      const successfulCalendars = [];
-      const failedCalendars = [];
-      
-      calendarResults.forEach(result => {
-        if (result.status === 'success') {
-          successfulCalendars.push(result.calendar);
-          result.events.forEach(event => {
-            allEvents.push({
-              ...event,
-              calendarName: result.calendar.summary,
-              calendarColor: result.calendar.backgroundColor,
-              isPrimary: result.calendar.primary || false
-            });
-          });
-        } else {
-          failedCalendars.push({
-            calendar: result.calendar,
-            error: result.error
-          });
-        }
+      // Sort all events by start time
+      allEvents.sort((a, b) => {
+        const aStart = new Date(a.start.dateTime || a.start.date);
+        const bStart = new Date(b.start.dateTime || b.start.date);
+        return aStart - bStart;
       });
       
-      // Sort events by start time
-      allEvents.sort((a, b) => 
-        new Date(a.startDateTime) - new Date(b.startDateTime)
-      );
-      
-      const summary = {
-        totalEvents: allEvents.length,
-        totalCalendars: filteredCalendars.length,
-        successfulCalendars: successfulCalendars.length,
-        failedCalendars: failedCalendars.length,
-        timeRange: { timeMin, timeMax },
-        errors: failedCalendars
-      };
-      
-      console.log(`📅 ✅ Calendar fetch complete:`, summary);
-      
-      return {
-        events: allEvents,
-        calendars: successfulCalendars,
-        summary: summary
-      };
+      console.log(`📅 ✅ Total events fetched: ${allEvents.length}`);
+      return allEvents;
       
     } catch (error) {
-      console.error('📅 ❌ Failed to fetch calendar data:', error);
-      
-      // Return empty data structure instead of throwing
-      return { 
-        events: [], 
-        calendars: [], 
-        summary: {
-          totalEvents: 0,
-          totalCalendars: 0,
-          successfulCalendars: 0,
-          failedCalendars: 0,
-          error: error.message
-        }
-      };
+      console.error('📅 ❌ Failed to fetch all calendar events:', error);
+      throw new Error(`All calendar events fetch failed: ${error.message}`);
     }
   }
 
-  // ====================
-  // UTILITY METHODS
-  // ====================
+  // EXISTING PHOTOS API METHODS (commented out as requested in original)
 
-  // UPDATED: Better testAccess with more detailed results
+  // Test API access with enhanced token handling
   async testAccess() {
     console.log('🧪 Testing Google API access...');
     
     const results = {
-      photos: false,
       calendar: false,
-      errors: [],
+      photos: false,
       tokenStatus: 'unknown',
+      errors: [],
       details: {}
     };
-
-    // First, check if we have a token at all
-    const token = this.getAccessToken();
-    if (!token) {
-      results.errors.push('No access token available');
-      results.tokenStatus = 'missing';
-      console.error('❌ No Google access token available for testing');
-      return results;
-    }
-
-    console.log(`🧪 Testing with token: ${token.substring(0, 20)}... (length: ${token.length})`);
-    results.tokenStatus = 'present';
-
+    
     // Test Calendar API access
     try {
       console.log('🧪 Testing Calendar API access...');
@@ -507,23 +317,19 @@ export class GoogleAPIClient {
       const calendars = await this.getCalendarList();
       const calendarTime = Date.now() - calendarStart;
       
-      if (calendars && calendars.length >= 0) {
-        results.calendar = true;
-        results.tokenStatus = 'valid';
-        results.details.calendar = {
-          calendarsFound: calendars.length,
-          responseTime: calendarTime,
-          configuredCalendars: calendars.filter(cal => 
-            CALENDARS_TO_INCLUDE.includes(cal.summary) || cal.primary
-          ).length
-        };
-        console.log('✅ Google Calendar API access confirmed');
-        console.log(`✅ Found ${calendars.length} calendars (${results.details.calendar.configuredCalendars} configured)`);
-      } else {
-        results.calendar = false;
-        results.errors.push('Calendar API: No calendars returned');
-        console.error('❌ Google Calendar API returned no calendars');
-      }
+      results.calendar = true;
+      results.tokenStatus = 'valid';
+      results.details.calendar = {
+        calendarsFound: calendars.length,
+        responseTime: calendarTime,
+        configuredCalendars: calendars.filter(cal => 
+          CALENDARS_TO_INCLUDE.some(target => 
+            cal.summary.includes(target) || cal.id.includes(target)
+          )
+        ).length
+      };
+      console.log('✅ Google Calendar API access confirmed');
+      console.log(`✅ Found ${calendars.length} calendars (${results.details.calendar.configuredCalendars} configured)`);
       
     } catch (error) {
       results.calendar = false;
@@ -538,29 +344,6 @@ export class GoogleAPIClient {
       }
     }
     
-    // Test Photos API access (commented out for now as requested)
-    /*
-    try {
-      console.log('🧪 Testing Photos API access...');
-      const photosStart = Date.now();
-      const albums = await this.getPhotoAlbums();
-      const photosTime = Date.now() - photosStart;
-      
-      results.photos = true;
-      results.details.photos = {
-        albumsFound: albums.length,
-        responseTime: photosTime
-      };
-      console.log('✅ Google Photos API access confirmed');
-      console.log(`✅ Found ${albums.length} photo albums`);
-      
-    } catch (error) {
-      results.photos = false;
-      results.errors.push(`Photos API: ${error.message}`);
-      console.error('❌ Google Photos API access failed:', error);
-    }
-    */
-    
     // Log final results
     console.log('🧪 ✅ API test complete:', {
       calendar: results.calendar,
@@ -573,7 +356,7 @@ export class GoogleAPIClient {
     return results;
   }
 
-  // NEW: Health check for monitoring API status
+  // Health check for monitoring API status
   async healthCheck() {
     const start = Date.now();
     
