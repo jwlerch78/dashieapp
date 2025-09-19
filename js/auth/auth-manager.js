@@ -403,6 +403,132 @@ async initializeGoogleAPIs() {
     return response;
   }
 
+async handlePhotosRequest(requestType, params, response) {
+  if (!this.pickerSessionManager) {
+    throw new Error('Picker Session Manager not initialized');
+  }
+  
+  console.log(`Handling photos request: ${requestType}`, params);
+  
+  switch (requestType) {
+    case 'status':
+      // Get current session and photo status
+      const sessionInfo = this.pickerSessionManager.getSessionInfo();
+      const sessionStatus = await this.pickerSessionManager.checkSessionStatus();
+      
+      response.success = true;
+      response.data = {
+        ...sessionInfo,
+        currentStatus: sessionStatus.status,
+        hasPhotos: sessionStatus.hasPhotos,
+        photoCount: sessionStatus.photoCount || sessionInfo.photoCount
+      };
+      console.log(`Photos status: ${sessionStatus.status}, photos: ${sessionStatus.hasPhotos}`);
+      break;
+      
+    case 'get-photos':
+      // Get current photos for display
+      if (this.pickerSessionManager.hasPhotos()) {
+        const photos = this.pickerSessionManager.getPhotos();
+        response.success = true;
+        response.data = photos;
+        console.log(`Retrieved ${photos.length} photos for display`);
+      } else {
+        response.success = false;
+        response.error = 'No photos selected. User needs to select an album first.';
+        response.needsSelection = true;
+      }
+      break;
+      
+    case 'start-selection':
+      // Start new album selection flow
+      const selectionResult = await this.pickerSessionManager.startAlbumSelection();
+      
+      if (selectionResult.success) {
+        response.success = true;
+        response.data = {
+          sessionId: selectionResult.sessionId,
+          pickerUri: selectionResult.pickerUri,
+          qrCode: selectionResult.qrCode,
+          message: 'Album selection session created'
+        };
+        console.log(`Album selection started: ${selectionResult.sessionId}`);
+      } else {
+        response.success = false;
+        response.error = selectionResult.error;
+      }
+      break;
+      
+    case 'check-selection':
+      // Check if user has completed album selection
+      const checkResult = await this.pickerSessionManager.checkSessionStatus();
+      
+      response.success = true;
+      response.data = {
+        status: checkResult.status,
+        hasPhotos: checkResult.hasPhotos,
+        photoCount: checkResult.photoCount,
+        albumInfo: checkResult.albumInfo,
+        completed: checkResult.status === 'completed'
+      };
+      console.log(`Selection check: ${checkResult.status}`);
+      break;
+      
+    case 'clear-selection':
+      // Clear current selection and start fresh
+      const clearResult = await this.pickerSessionManager.clearAndSelectNew();
+      
+      if (clearResult.success) {
+        response.success = true;
+        response.data = {
+          sessionId: clearResult.sessionId,
+          pickerUri: clearResult.pickerUri,
+          qrCode: clearResult.qrCode,
+          message: 'Previous selection cleared, new session created'
+        };
+        console.log('Photos cleared and new selection started');
+      } else {
+        response.success = false;
+        response.error = clearResult.error;
+      }
+      break;
+      
+    case 'get-qr-code':
+      // Get QR code for current session (if any)
+      const qrCode = this.pickerSessionManager.getCurrentQRCode();
+      
+      if (qrCode) {
+        response.success = true;
+        response.data = qrCode;
+      } else {
+        response.success = false;
+        response.error = 'No active selection session';
+      }
+      break;
+      
+    case 'get-album-info':
+      // Get information about selected album
+      const albumInfo = this.pickerSessionManager.getAlbumInfo();
+      
+      response.success = true;
+      response.data = albumInfo;
+      break;
+      
+    case 'get-stats':
+      // Get stats for settings/debugging
+      const stats = this.pickerSessionManager.getStats();
+      
+      response.success = true;
+      response.data = stats;
+      break;
+      
+    default:
+      throw new Error(`Unknown photos request type: ${requestType}`);
+  }
+  
+  return response;
+}
+  
 async initializeGoogleAPIs() {
   if (!this.googleAccessToken) {
     console.warn('No Google access token available for API initialization');
