@@ -55,7 +55,7 @@ html, body {
   box-sizing: border-box;
 }
 
-/* Empty state - QR code and setup */
+/* Empty state - QR code and setup (with background polling) */
 .empty-state {
   flex-direction: column;
   text-align: center;
@@ -102,47 +102,6 @@ html, body {
 
 .selection-link:hover {
   background: rgba(255, 255, 255, 0.2);
-}
-
-/* Pending state - waiting for selection */
-.pending-state {
-  flex-direction: column;
-  gap: 15px;
-}
-
-.pending-state h3 {
-  color: var(--text-primary, #fff);
-  margin: 0;
-  font-size: 16px;
-  font-weight: 500;
-}
-
-.pending-state p {
-  color: var(--text-secondary, #ccc);
-  margin: 0;
-  font-size: 12px;
-  text-align: center;
-  line-height: 1.4;
-}
-
-.loading-spinner {
-  width: 40px;
-  height: 40px;
-  border: 3px solid rgba(255, 255, 255, 0.1);
-  border-top: 3px solid var(--text-primary, #fff);
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
-}
-
-.polling-status {
-  font-size: 10px;
-  color: var(--text-muted, #999);
-  text-align: center;
 }
 
 /* Display state - photo slideshow */
@@ -265,7 +224,7 @@ html, body {
 </style>
 
 <body class="theme-dark">
-  <!-- Empty State: No photos selected -->
+  <!-- Empty State: Show QR code and poll in background -->
   <div id="empty-state" class="widget-state empty-state">
     <h3>Select Photo Album</h3>
     <div class="qr-code-container">
@@ -273,14 +232,6 @@ html, body {
     </div>
     <p>Scan with your phone or click below to select an album from Google Photos</p>
     <a id="selection-link" class="selection-link" href="#" target="_blank">Choose Album</a>
-  </div>
-
-  <!-- Pending State: Waiting for selection -->
-  <div id="pending-state" class="widget-state pending-state hidden">
-    <h3>Waiting for Album Selection</h3>
-    <div class="loading-spinner"></div>
-    <p>Complete your album selection on your phone or browser</p>
-    <div id="polling-status" class="polling-status">Checking for selection...</div>
   </div>
 
   <!-- Display State: Photo slideshow -->
@@ -301,11 +252,7 @@ html, body {
     </div>
   </div>
 
-  <!-- Error State -->
-  <div id="error-state" class="widget-state error-state hidden">
-    <h3 class="error-title">Unable to Load Photos</h3>
-    <p id="error-message" class="error-message">An error occurred</p>
-    <button id="retry-button" class="retry-button">Try Again</button>
+  <!-- Error State - removed, now just falls back to empty state -->
   </div>
 
   <script type="module">
@@ -322,20 +269,15 @@ html, body {
         this.pollInterval = null;
         this.pollCount = 0;
         
-        // DOM elements
+        // DOM elements - simplified to just two states
         this.emptyState = document.getElementById('empty-state');
-        this.pendingState = document.getElementById('pending-state');
         this.displayState = document.getElementById('display-state');
-        this.errorState = document.getElementById('error-state');
         
         this.qrCodeImage = document.getElementById('qr-code-image');
         this.selectionLink = document.getElementById('selection-link');
-        this.pollingStatus = document.getElementById('polling-status');
         this.photoImage = document.getElementById('photo-image');
         this.photoTitle = document.getElementById('photo-title');
         this.photoDetails = document.getElementById('photo-details');
-        this.errorMessage = document.getElementById('error-message');
-        this.retryButton = document.getElementById('retry-button');
         
         this.init();
       }
@@ -361,11 +303,6 @@ html, body {
       }
 
       setupEventHandlers() {
-        // Retry button
-        this.retryButton.addEventListener('click', () => {
-          this.startNewSelection();
-        });
-
         // Selection link click
         this.selectionLink.addEventListener('click', (event) => {
           event.preventDefault();
@@ -434,7 +371,8 @@ html, body {
             break;
             
           case 'picker-error':
-            this.showError(`Picker error: ${data.error}`);
+            console.error('Picker error:', data.error);
+            // Stay in current state, don't break the UX
             break;
             
           case 'theme-change':
@@ -457,9 +395,11 @@ html, body {
       handleWidgetDataResponse(data) {
         if (!data.success) {
           if (data.needsSelection) {
+            // Stay in empty state, just start new selection
             this.startNewSelection();
           } else {
-            this.showError(data.error || 'Failed to load photos');
+            console.error('Photos widget error:', data.error);
+            // Stay in empty state, user can try again with QR code
           }
           return;
         }
@@ -483,7 +423,7 @@ html, body {
         if (statusData.hasPhotos && statusData.photoCount > 0) {
           this.requestPhotos();
         } else if (statusData.currentStatus === 'pending') {
-          this.showPendingState();
+          // Keep QR code visible, just start polling in background
           this.startPolling();
         } else {
           this.startNewSelection();
@@ -519,7 +459,8 @@ html, body {
           this.stopPolling();
           this.requestPhotos();
         } else if (data.status === 'pending') {
-          this.updatePollingStatus(`Waiting for selection... (${this.pollCount})`);
+          // Update status but keep current state (don't hide QR code)
+          console.log(`📸 Still pending selection... (poll ${this.pollCount})`);
         }
       }
 
@@ -576,9 +517,9 @@ html, body {
         }
       }
 
-      // State Management
+      // State Management - simplified to just empty and display
       showEmptyState(qrCode, pickerUri) {
-        console.log('📸 Showing empty state');
+        console.log('Photos showing empty state with QR code');
         this.currentState = 'empty';
         
         if (qrCode) {
@@ -590,33 +531,15 @@ html, body {
         this.emptyState.classList.remove('hidden');
       }
 
-      showPendingState() {
-        console.log('📸 Showing pending state');
-        this.currentState = 'pending';
-        this.hideAllStates();
-        this.pendingState.classList.remove('hidden');
-      }
-
       showDisplayState() {
-        console.log('📸 Showing display state');
+        console.log('Photos showing display state');
         this.currentState = 'display';
         this.hideAllStates();
         this.displayState.classList.remove('hidden');
       }
 
-      showError(message) {
-        console.error('📸 Showing error:', message);
-        this.currentState = 'error';
-        this.stopPolling();
-        this.stopSlideshow();
-        
-        this.errorMessage.textContent = message;
-        this.hideAllStates();
-        this.errorState.classList.remove('hidden');
-      }
-
       hideAllStates() {
-        [this.emptyState, this.pendingState, this.displayState, this.errorState].forEach(el => {
+        [this.emptyState, this.displayState].forEach(el => {
           el.classList.add('hidden');
         });
       }
@@ -638,13 +561,7 @@ html, body {
         if (this.pollInterval) {
           clearInterval(this.pollInterval);
           this.pollInterval = null;
-          console.log('📸 Stopped polling');
-        }
-      }
-
-      updatePollingStatus(message) {
-        if (this.pollingStatus) {
-          this.pollingStatus.textContent = message;
+          console.log('Photos stopped polling');
         }
       }
 
