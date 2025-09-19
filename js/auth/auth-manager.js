@@ -529,60 +529,6 @@ async handlePhotosRequest(requestType, params, response) {
   return response;
 }
   
-async initializeGoogleAPIs() {
-  if (!this.googleAccessToken) {
-    console.warn('No Google access token available for API initialization');
-    return;
-  }
-
-  try {
-    // Initialize Google API client (for Calendar)
-    this.googleAPI = new GoogleAPIClient(this);
-    
-    // Initialize Picker Session Manager (for Photos)
-    this.pickerSessionManager = new PickerSessionManager(this);
-    
-    // Set up picker callbacks
-    this.pickerSessionManager.setCallbacks({
-      onSessionCreated: (session) => {
-        console.log('Picker session created, notifying widgets...');
-        this.notifyWidgetsOfPickerSession(session);
-      },
-      onPhotosSelected: (photos) => {
-        console.log(`Photos selected (${photos.length}), updating widgets...`);
-        this.notifyWidgetsOfPhotosUpdate(photos);
-      },
-      onSelectionComplete: (result) => {
-        console.log('Album selection complete, refreshing photo widgets...');
-        this.notifyWidgetsOfSelectionComplete(result);
-      },
-      onError: (error) => {
-        console.error('Picker session error:', error);
-        this.notifyWidgetsOfPickerError(error);
-      }
-    });
-    
-    // Test API access
-    const testResults = await this.googleAPI.testAccess();
-    const pickerTest = await this.pickerSessionManager.testAccess();
-    
-    // Combine test results
-    const combinedResults = {
-      ...testResults,
-      picker: pickerTest.success,
-      photos: pickerTest.success // For compatibility
-    };
-    
-    console.log('Google APIs initialized:', combinedResults);
-    
-    // Notify widgets
-    this.notifyWidgetsOfAPIReadiness(combinedResults);
-    
-  } catch (error) {
-    console.error('Google APIs initialization failed:', error);
-    this.notifyWidgetsOfAPIReadiness({ calendar: false, photos: false, picker: false });
-  }
-}
 
 // Notify widgets when picker session is created
 notifyWidgetsOfPickerSession(session) {
@@ -663,4 +609,5 @@ notifyWidgetsOfPickerError(error) {
       }
     }
   });
+}
 }
