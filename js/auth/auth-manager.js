@@ -5,6 +5,8 @@ import { CognitoAuth } from './cognito-auth.js';
 import { AuthUI } from './auth-ui.js';
 import { AuthStorage } from './auth-storage.js';
 import { GoogleAPIClient } from '../google-apis/google-api-client.js';
+import { PickerSessionManager } from '../google-apis/picker-session-manager.js';
+
 
 export class AuthManager {
   constructor() {
@@ -12,6 +14,8 @@ export class AuthManager {
     this.isSignedIn = false;
     this.googleAccessToken = null;
     this.googleAPI = null;
+    this.pickerSessionManager = null;
+
     
     // Initialize auth modules - much simpler now!
     this.cognitoAuth = new CognitoAuth();
@@ -103,46 +107,56 @@ export class AuthManager {
     }
   }
 
-  async signOut() {
-    console.log('🔐 Signing out...');
+ // Updated cleanup method
+async signOut() {
+  console.log('Signing out...');
+  
+  try {
+    // Clear refresh timers
+    Object.values(this.refreshTimers).forEach(timer => clearTimeout(timer));
+    this.refreshTimers = {};
     
-    try {
-      // Clear refresh timers
-      Object.values(this.refreshTimers).forEach(timer => clearTimeout(timer));
-      this.refreshTimers = {};
-      
-      // Clear data cache
-      this.dataCache = {
-        calendar: { events: [], calendars: [], lastUpdated: null, refreshInterval: 5 * 60 * 1000, isLoading: false },
-        photos: { albums: [], recentPhotos: [], lastUpdated: null, refreshInterval: 30 * 60 * 1000, isLoading: false }
-      };
-      
-      // Sign out from Cognito
-      await this.cognitoAuth.signOut();
-      
-      // Clear local state
-      this.currentUser = null;
-      this.isSignedIn = false;
-      this.googleAccessToken = null;
-      this.googleAPI = null;
-      
-      // Clear legacy storage
-      this.storage.clearSavedUser();
-      
-      // Show sign-in prompt
-      this.ui.showSignInPrompt(() => this.signIn(), () => this.exitApp());
-      
-    } catch (error) {
-      console.error('🔐 ❌ Sign-out failed:', error);
-      // Still clear local state even if remote sign-out fails
-      this.currentUser = null;
-      this.isSignedIn = false;
-      this.googleAccessToken = null;
-      this.googleAPI = null;
-      this.ui.showSignInPrompt(() => this.signIn(), () => this.exitApp());
+    // Clear data cache
+    this.dataCache = {
+      calendar: { events: [], calendars: [], lastUpdated: null, refreshInterval: 5 * 60 * 1000, isLoading: false },
+      photos: { albums: [], recentPhotos: [], lastUpdated: null, refreshInterval: 30 * 60 * 1000, isLoading: false }
+    };
+    
+    // Cleanup picker session manager
+    if (this.pickerSessionManager) {
+      this.pickerSessionManager.cleanup();
+      this.pickerSessionManager = null;
     }
+    
+    // Sign out from Cognito
+    await this.cognitoAuth.signOut();
+    
+    // Clear local state
+    this.currentUser = null;
+    this.isSignedIn = false;
+    this.googleAccessToken = null;
+    this.googleAPI = null;
+    
+    // Clear legacy storage
+    this.storage.clearSavedUser();
+    
+    // Show sign-in prompt
+    this.ui.showSignInPrompt(() => this.signIn(), () => this.exitApp());
+    
+  } catch (error) {
+    console.error('Sign-out failed:', error);
+    // Still clear local state even if remote sign-out fails
+    this.currentUser = null;
+    this.isSignedIn = false;
+    this.googleAccessToken = null;
+    this.googleAPI = null;
+    if (this.pickerSessionManager) {
+      this.pickerSessionManager.cleanup();
+      this.pickerSessionManager = null;
+    }
+    this.ui.showSignInPrompt(() => this.signIn(), () => this.exitApp());
   }
-
+}
   exitApp() {
     console.log('🚪 Exiting Dashie...');
     
@@ -211,26 +225,60 @@ export class AuthManager {
   }
 
   // Google APIs initialization (updated for Cognito)
-  async initializeGoogleAPIs() {
-    if (!this.googleAccessToken) {
-      console.warn('🔐 ⚠️ No Google access token available for API initialization');
-      return;
-    }
-
-    try {
-      // Pass 'this' as the auth manager so GoogleAPIClient can call refreshGoogleAccessToken
-      this.googleAPI = new GoogleAPIClient(this);
-      const testResults = await this.googleAPI.testAccess();
-      console.log('🌐 ✅ Google APIs initialized:', testResults);
-      
-      // Notify widgets (unchanged)
-      this.notifyWidgetsOfAPIReadiness(testResults);
-      
-    } catch (error) {
-      console.error('🌐 ❌ Google APIs initialization failed:', error);
-      this.notifyWidgetsOfAPIReadiness({ calendar: false, photos: false });
-    }
+async initializeGoogleAPIs() {
+  if (!this.googleAccessToken) {
+    console.warn('No Google access token available for API initialization');
+    return;
   }
+
+  try {
+    // Initialize Google API client (for Calendar)
+    this.googleAPI = new GoogleAPIClient(this);
+    
+    // Initialize Picker Session Manager (for Photos)
+    this.pickerSessionManager = new PickerSessionManager(this);
+    
+    // Set up picker callbacks
+    this.pickerSessionManager.setCallbacks({
+      onSessionCreated: (session) => {
+        console.log('Picker session created, notifying widgets...');
+        this.notifyWidgetsOfPickerSession(session);
+      },
+      onPhotosSelected: (photos) => {
+        console.log(`Photos selected (${photos.length}), updating widgets...`);
+        this.notifyWidgetsOfPhotosUpdate(photos);
+      },
+      onSelectionComplete: (result) => {
+        console.log('Album selection complete, refreshing photo widgets...');
+        this.notifyWidgetsOfSelectionComplete(result);
+      },
+      onError: (error) => {
+        console.error('Picker session error:', error);
+        this.notifyWidgetsOfPickerError(error);
+      }
+    });
+    
+    // Test API access
+    const testResults = await this.googleAPI.testAccess();
+    const pickerTest = await this.pickerSessionManager.testAccess();
+    
+    // Combine test results
+    const combinedResults = {
+      ...testResults,
+      picker: pickerTest.success,
+      photos: pickerTest.success // For compatibility
+    };
+    
+    console.log('Google APIs initialized:', combinedResults);
+    
+    // Notify widgets
+    this.notifyWidgetsOfAPIReadiness(combinedResults);
+    
+  } catch (error) {
+    console.error('Google APIs initialization failed:', error);
+    this.notifyWidgetsOfAPIReadiness({ calendar: false, photos: false, picker: false });
+  }
+}
 
   // Widget communication methods (unchanged from original)
   setupWidgetRequestHandler() {
@@ -355,28 +403,138 @@ export class AuthManager {
     return response;
   }
 
-  async handlePhotosRequest(requestType, params, response) {
-    if (!this.googleAPI) {
-      throw new Error('Google APIs not initialized');
-    }
-    
-    switch (requestType) {
-      case 'albums':
-        const albums = await this.googleAPI.getPhotoAlbums();
-        response.success = true;
-        response.data = albums;
-        break;
-        
-      case 'recent':
-        const photos = await this.googleAPI.getRecentPhotos(params?.count || 10);
-        response.success = true;
-        response.data = photos;
-        break;
-        
-      default:
-        throw new Error(`Unknown photos request type: ${requestType}`);
-    }
-    
-    return response;
+async initializeGoogleAPIs() {
+  if (!this.googleAccessToken) {
+    console.warn('No Google access token available for API initialization');
+    return;
   }
+
+  try {
+    // Initialize Google API client (for Calendar)
+    this.googleAPI = new GoogleAPIClient(this);
+    
+    // Initialize Picker Session Manager (for Photos)
+    this.pickerSessionManager = new PickerSessionManager(this);
+    
+    // Set up picker callbacks
+    this.pickerSessionManager.setCallbacks({
+      onSessionCreated: (session) => {
+        console.log('Picker session created, notifying widgets...');
+        this.notifyWidgetsOfPickerSession(session);
+      },
+      onPhotosSelected: (photos) => {
+        console.log(`Photos selected (${photos.length}), updating widgets...`);
+        this.notifyWidgetsOfPhotosUpdate(photos);
+      },
+      onSelectionComplete: (result) => {
+        console.log('Album selection complete, refreshing photo widgets...');
+        this.notifyWidgetsOfSelectionComplete(result);
+      },
+      onError: (error) => {
+        console.error('Picker session error:', error);
+        this.notifyWidgetsOfPickerError(error);
+      }
+    });
+    
+    // Test API access
+    const testResults = await this.googleAPI.testAccess();
+    const pickerTest = await this.pickerSessionManager.testAccess();
+    
+    // Combine test results
+    const combinedResults = {
+      ...testResults,
+      picker: pickerTest.success,
+      photos: pickerTest.success // For compatibility
+    };
+    
+    console.log('Google APIs initialized:', combinedResults);
+    
+    // Notify widgets
+    this.notifyWidgetsOfAPIReadiness(combinedResults);
+    
+  } catch (error) {
+    console.error('Google APIs initialization failed:', error);
+    this.notifyWidgetsOfAPIReadiness({ calendar: false, photos: false, picker: false });
+  }
+}
+
+// Notify widgets when picker session is created
+notifyWidgetsOfPickerSession(session) {
+  const allWidgetIframes = document.querySelectorAll('.widget-iframe, .widget iframe');
+  
+  allWidgetIframes.forEach((iframe) => {
+    if (iframe.contentWindow) {
+      try {
+        iframe.contentWindow.postMessage({
+          type: 'picker-session-created',
+          sessionId: session.sessionId,
+          pickerUri: session.pickerUri,
+          qrCode: this.pickerSessionManager.getCurrentQRCode(),
+          timestamp: Date.now()
+        }, '*');
+      } catch (error) {
+        console.error('Failed to notify widget of picker session:', error);
+      }
+    }
+  });
+}
+
+// Notify widgets when photos are updated
+notifyWidgetsOfPhotosUpdate(photos) {
+  const allWidgetIframes = document.querySelectorAll('.widget-iframe, .widget iframe');
+  
+  allWidgetIframes.forEach((iframe) => {
+    if (iframe.contentWindow) {
+      try {
+        iframe.contentWindow.postMessage({
+          type: 'photos-updated',
+          photos: photos,
+          photoCount: photos.length,
+          timestamp: Date.now()
+        }, '*');
+      } catch (error) {
+        console.error('Failed to notify widget of photos update:', error);
+      }
+    }
+  });
+}
+
+// Notify widgets when selection is complete
+notifyWidgetsOfSelectionComplete(result) {
+  const allWidgetIframes = document.querySelectorAll('.widget-iframe, .widget iframe');
+  
+  allWidgetIframes.forEach((iframe) => {
+    if (iframe.contentWindow) {
+      try {
+        iframe.contentWindow.postMessage({
+          type: 'selection-complete',
+          photos: result.photos,
+          albumInfo: result.albumInfo,
+          photoCount: result.photos.length,
+          timestamp: Date.now()
+        }, '*');
+      } catch (error) {
+        console.error('Failed to notify widget of selection complete:', error);
+      }
+    }
+  });
+}
+
+// Notify widgets of picker errors
+notifyWidgetsOfPickerError(error) {
+  const allWidgetIframes = document.querySelectorAll('.widget-iframe, .widget iframe');
+  
+  allWidgetIframes.forEach((iframe) => {
+    if (iframe.contentWindow) {
+      try {
+        iframe.contentWindow.postMessage({
+          type: 'picker-error',
+          error: error.message,
+          timestamp: Date.now()
+        }, '*');
+      } catch (error) {
+        console.error('Failed to notify widget of picker error:', error);
+      }
+    }
+  });
 }
