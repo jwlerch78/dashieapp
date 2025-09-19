@@ -1,0 +1,815 @@
+<!-- Photos.html -->
+<!-- Using google photos picker -->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Photos Widget</title>
+  
+  <!-- Apply theme immediately to prevent flash -->
+  <script>
+    (function() {
+      try {
+        const savedTheme = localStorage.getItem('dashie-theme') || 'dark';
+        document.documentElement.className = `theme-${savedTheme}`;
+        if (document.body) {
+          document.body.className = `theme-${savedTheme}`;
+        } else {
+          document.addEventListener('DOMContentLoaded', function() {
+            document.body.className = `theme-${savedTheme}`;
+          });
+        }
+      } catch (e) {
+        document.documentElement.className = 'theme-dark';
+        if (document.body) document.body.className = 'theme-dark';
+      }
+    })();
+  </script>
+  
+  <!-- Import theme variables from parent -->
+  <link rel="stylesheet" href="../css/core/variables.css">
+</head>
+
+<style>
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg-primary, #222);
+  overflow: hidden;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Common container styles */
+.widget-state {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  padding: var(--padding-widget, 8px);
+  box-sizing: border-box;
+}
+
+/* Empty state - QR code and setup */
+.empty-state {
+  flex-direction: column;
+  text-align: center;
+  gap: 20px;
+}
+
+.empty-state h3 {
+  color: var(--text-primary, #fff);
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.empty-state p {
+  color: var(--text-secondary, #ccc);
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.qr-code-container {
+  background: white;
+  border-radius: 8px;
+  padding: 15px;
+  max-width: 180px;
+}
+
+.qr-code-image {
+  width: 150px;
+  height: 150px;
+  display: block;
+  margin: 0 auto;
+}
+
+.selection-link {
+  color: var(--text-primary, #fff);
+  text-decoration: none;
+  padding: 8px 16px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  font-size: 12px;
+  transition: background-color 0.2s;
+}
+
+.selection-link:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Pending state - waiting for selection */
+.pending-state {
+  flex-direction: column;
+  gap: 15px;
+}
+
+.pending-state h3 {
+  color: var(--text-primary, #fff);
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.pending-state p {
+  color: var(--text-secondary, #ccc);
+  margin: 0;
+  font-size: 12px;
+  text-align: center;
+  line-height: 1.4;
+}
+
+.loading-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(255, 255, 255, 0.1);
+  border-top: 3px solid var(--text-primary, #fff);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.polling-status {
+  font-size: 10px;
+  color: var(--text-muted, #999);
+  text-align: center;
+}
+
+/* Display state - photo slideshow */
+.display-state {
+  position: relative;
+  padding: 0;
+}
+
+.photo-container {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  background: var(--bg-primary);
+}
+
+.photo-container img {
+  position: absolute;
+  top: var(--padding-widget, 8px);
+  left: var(--padding-widget, 8px);
+  right: var(--padding-widget, 8px);
+  bottom: var(--padding-widget, 8px);
+  width: calc(100% - calc(var(--padding-widget, 8px) * 2));
+  height: calc(100% - calc(var(--padding-widget, 8px) * 2));
+  object-fit: contain;
+  object-position: center center;
+  display: block;
+  transition: opacity 0.3s ease;
+  border-radius: 6px;
+}
+
+/* Photo info overlay */
+.photo-info {
+  position: absolute;
+  bottom: var(--padding-widget, 8px);
+  left: var(--padding-widget, 8px);
+  right: var(--padding-widget, 8px);
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 10px;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+
+.display-state:hover .photo-info {
+  opacity: 1;
+}
+
+.photo-title {
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+
+.photo-details {
+  font-size: 9px;
+  opacity: 0.8;
+}
+
+/* Controls info */
+.controls-info {
+  position: absolute;
+  top: var(--padding-widget, 8px);
+  right: var(--padding-widget, 8px);
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 3px 6px;
+  border-radius: 3px;
+  font-size: 9px;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+
+.display-state:hover .controls-info {
+  opacity: 1;
+}
+
+/* Error state */
+.error-state {
+  flex-direction: column;
+  gap: 10px;
+  text-align: center;
+}
+
+.error-title {
+  color: #ff6b6b;
+  font-size: 14px;
+  font-weight: 500;
+  margin: 0;
+}
+
+.error-message {
+  color: var(--text-secondary, #ccc);
+  font-size: 11px;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.retry-button {
+  color: var(--text-primary, #fff);
+  background: rgba(255, 255, 255, 0.1);
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.retry-button:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Hidden utility */
+.hidden {
+  display: none !important;
+}
+</style>
+
+<body class="theme-dark">
+  <!-- Empty State: No photos selected -->
+  <div id="empty-state" class="widget-state empty-state">
+    <h3>Select Photo Album</h3>
+    <div class="qr-code-container">
+      <img id="qr-code-image" class="qr-code-image" src="" alt="QR Code">
+    </div>
+    <p>Scan with your phone or click below to select an album from Google Photos</p>
+    <a id="selection-link" class="selection-link" href="#" target="_blank">Choose Album</a>
+  </div>
+
+  <!-- Pending State: Waiting for selection -->
+  <div id="pending-state" class="widget-state pending-state hidden">
+    <h3>Waiting for Album Selection</h3>
+    <div class="loading-spinner"></div>
+    <p>Complete your album selection on your phone or browser</p>
+    <div id="polling-status" class="polling-status">Checking for selection...</div>
+  </div>
+
+  <!-- Display State: Photo slideshow -->
+  <div id="display-state" class="widget-state display-state hidden">
+    <div class="photo-container">
+      <img id="photo-image" src="" alt="Photo">
+      
+      <!-- Photo Info Overlay -->
+      <div class="photo-info">
+        <div id="photo-title" class="photo-title">Photo Title</div>
+        <div id="photo-details" class="photo-details">Details</div>
+      </div>
+      
+      <!-- Controls Info -->
+      <div class="controls-info">
+        ←→: Navigate | Space: Pause
+      </div>
+    </div>
+  </div>
+
+  <!-- Error State -->
+  <div id="error-state" class="widget-state error-state hidden">
+    <h3 class="error-title">Unable to Load Photos</h3>
+    <p id="error-message" class="error-message">An error occurred</p>
+    <button id="retry-button" class="retry-button">Try Again</button>
+  </div>
+
+  <script type="module">
+    // CHANGE SUMMARY: Complete Google Photos Picker widget with three states and album selection
+
+    class PhotosPickerWidget {
+      constructor() {
+        this.photos = [];
+        this.currentPhotoIndex = 0;
+        this.autoAdvanceInterval = null;
+        this.transitionTime = 5000; // 5 seconds default
+        this.isPaused = false;
+        this.currentState = 'empty';
+        this.pollInterval = null;
+        this.pollCount = 0;
+        
+        // DOM elements
+        this.emptyState = document.getElementById('empty-state');
+        this.pendingState = document.getElementById('pending-state');
+        this.displayState = document.getElementById('display-state');
+        this.errorState = document.getElementById('error-state');
+        
+        this.qrCodeImage = document.getElementById('qr-code-image');
+        this.selectionLink = document.getElementById('selection-link');
+        this.pollingStatus = document.getElementById('polling-status');
+        this.photoImage = document.getElementById('photo-image');
+        this.photoTitle = document.getElementById('photo-title');
+        this.photoDetails = document.getElementById('photo-details');
+        this.errorMessage = document.getElementById('error-message');
+        this.retryButton = document.getElementById('retry-button');
+        
+        this.init();
+      }
+
+      init() {
+        console.log('📸 Photos Picker widget initializing...');
+        this.setupMessageHandlers();
+        this.setupEventHandlers();
+        
+        // Check initial status
+        setTimeout(() => {
+          this.checkPhotosStatus();
+        }, 1000);
+      }
+
+      setupMessageHandlers() {
+        window.addEventListener('message', (event) => {
+          if (!event.data || !event.data.type) return;
+          
+          console.log('📸 Received message:', event.data.type);
+          this.handleMessage(event.data);
+        });
+      }
+
+      setupEventHandlers() {
+        // Retry button
+        this.retryButton.addEventListener('click', () => {
+          this.startNewSelection();
+        });
+
+        // Selection link click
+        this.selectionLink.addEventListener('click', (event) => {
+          event.preventDefault();
+          this.startNewSelection();
+        });
+
+        // Keyboard navigation for slideshow
+        window.addEventListener('keydown', (event) => {
+          if (this.currentState !== 'display' || this.photos.length === 0) return;
+          
+          switch (event.key) {
+            case 'ArrowLeft':
+            case 'ArrowUp':
+              event.preventDefault();
+              this.prevPhoto();
+              break;
+            case 'ArrowRight':
+            case 'ArrowDown':
+              event.preventDefault();
+              this.nextPhoto();
+              break;
+            case ' ':
+            case 'Enter':
+              event.preventDefault();
+              this.togglePause();
+              break;
+          }
+        });
+
+        // Handle navigation commands from parent
+        window.addEventListener('message', (event) => {
+          if (event.data && event.data.action && this.currentState === 'display') {
+            switch(event.data.action) {
+              case 'right':
+              case 'down':
+                this.nextPhoto();
+                break;
+              case 'left':
+              case 'up':
+                this.prevPhoto();
+                break;
+              case 'enter':
+                this.togglePause();
+                break;
+            }
+          }
+        });
+      }
+
+      handleMessage(data) {
+        switch (data.type) {
+          case 'widget-data-response':
+            this.handleWidgetDataResponse(data);
+            break;
+            
+          case 'picker-session-created':
+            this.handleSessionCreated(data);
+            break;
+            
+          case 'photos-updated':
+            this.handlePhotosUpdated(data);
+            break;
+            
+          case 'selection-complete':
+            this.handleSelectionComplete(data);
+            break;
+            
+          case 'picker-error':
+            this.showError(`Picker error: ${data.error}`);
+            break;
+            
+          case 'theme-change':
+            this.applyTheme(data.theme);
+            break;
+            
+          case 'google-apis-ready':
+            console.log('📸 Google APIs ready, checking photos status');
+            setTimeout(() => this.checkPhotosStatus(), 1000);
+            break;
+
+          case 'update-settings':
+            if (data.photoTransitionTime) {
+              this.updateTransitionTime(data.photoTransitionTime * 1000);
+            }
+            break;
+        }
+      }
+
+      handleWidgetDataResponse(data) {
+        if (!data.success) {
+          if (data.needsSelection) {
+            this.startNewSelection();
+          } else {
+            this.showError(data.error || 'Failed to load photos');
+          }
+          return;
+        }
+
+        const requestId = data.requestId;
+        
+        if (requestId && requestId.includes('status')) {
+          this.handleStatusResponse(data.data);
+        } else if (requestId && requestId.includes('photos')) {
+          this.handlePhotosResponse(data.data);
+        } else if (requestId && requestId.includes('start')) {
+          this.handleStartSelectionResponse(data.data);
+        } else if (requestId && requestId.includes('check')) {
+          this.handleCheckSelectionResponse(data.data);
+        }
+      }
+
+      handleStatusResponse(statusData) {
+        console.log('📸 Status response:', statusData);
+        
+        if (statusData.hasPhotos && statusData.photoCount > 0) {
+          this.requestPhotos();
+        } else if (statusData.currentStatus === 'pending') {
+          this.showPendingState();
+          this.startPolling();
+        } else {
+          this.startNewSelection();
+        }
+      }
+
+      handlePhotosResponse(photos) {
+        console.log('📸 Photos received:', photos.length);
+        
+        if (photos && photos.length > 0) {
+          this.photos = photos;
+          this.showDisplayState();
+          this.startSlideshow();
+        } else {
+          this.startNewSelection();
+        }
+      }
+
+      handleStartSelectionResponse(data) {
+        console.log('📸 Selection started:', data);
+        
+        if (data.qrCode && data.pickerUri) {
+          this.showEmptyState(data.qrCode, data.pickerUri);
+          this.startPolling();
+        } else {
+          this.showError('Failed to create selection session');
+        }
+      }
+
+      handleCheckSelectionResponse(data) {
+        if (data.completed && data.hasPhotos) {
+          console.log('📸 Selection completed, getting photos...');
+          this.stopPolling();
+          this.requestPhotos();
+        } else if (data.status === 'pending') {
+          this.updatePollingStatus(`Waiting for selection... (${this.pollCount})`);
+        }
+      }
+
+      handleSessionCreated(data) {
+        console.log('📸 Session created notification:', data);
+        this.showEmptyState(data.qrCode, data.pickerUri);
+        this.startPolling();
+      }
+
+      handlePhotosUpdated(data) {
+        console.log('📸 Photos updated notification:', data.photoCount);
+        this.photos = data.photos;
+        this.showDisplayState();
+        this.startSlideshow();
+      }
+
+      handleSelectionComplete(data) {
+        console.log('📸 Selection complete notification:', data.photoCount);
+        this.stopPolling();
+        this.photos = data.photos;
+        this.showDisplayState();
+        this.startSlideshow();
+      }
+
+      // API Request Methods
+      checkPhotosStatus() {
+        this.requestFromParent('photos', 'status', {}, 'status');
+      }
+
+      requestPhotos() {
+        this.requestFromParent('photos', 'get-photos', {}, 'photos');
+      }
+
+      startNewSelection() {
+        this.requestFromParent('photos', 'start-selection', {}, 'start');
+      }
+
+      checkSelection() {
+        this.requestFromParent('photos', 'check-selection', {}, 'check');
+      }
+
+      requestFromParent(dataType, requestType, params, suffix = '') {
+        try {
+          window.parent.postMessage({
+            type: 'widget-data-request',
+            dataType: dataType,
+            requestType: requestType,
+            requestId: Date.now() + '_' + suffix,
+            params: params
+          }, '*');
+        } catch (error) {
+          console.error('📸 Failed to request from parent:', error);
+          this.showError('Communication error with dashboard');
+        }
+      }
+
+      // State Management
+      showEmptyState(qrCode, pickerUri) {
+        console.log('📸 Showing empty state');
+        this.currentState = 'empty';
+        
+        if (qrCode) {
+          this.qrCodeImage.src = qrCode.qrCodeUrl;
+          this.selectionLink.href = pickerUri;
+        }
+        
+        this.hideAllStates();
+        this.emptyState.classList.remove('hidden');
+      }
+
+      showPendingState() {
+        console.log('📸 Showing pending state');
+        this.currentState = 'pending';
+        this.hideAllStates();
+        this.pendingState.classList.remove('hidden');
+      }
+
+      showDisplayState() {
+        console.log('📸 Showing display state');
+        this.currentState = 'display';
+        this.hideAllStates();
+        this.displayState.classList.remove('hidden');
+      }
+
+      showError(message) {
+        console.error('📸 Showing error:', message);
+        this.currentState = 'error';
+        this.stopPolling();
+        this.stopSlideshow();
+        
+        this.errorMessage.textContent = message;
+        this.hideAllStates();
+        this.errorState.classList.remove('hidden');
+      }
+
+      hideAllStates() {
+        [this.emptyState, this.pendingState, this.displayState, this.errorState].forEach(el => {
+          el.classList.add('hidden');
+        });
+      }
+
+      // Polling Management
+      startPolling() {
+        if (this.pollInterval) return;
+        
+        console.log('📸 Starting selection polling...');
+        this.pollCount = 0;
+        
+        this.pollInterval = setInterval(() => {
+          this.pollCount++;
+          this.checkSelection();
+        }, 3000); // Poll every 3 seconds
+      }
+
+      stopPolling() {
+        if (this.pollInterval) {
+          clearInterval(this.pollInterval);
+          this.pollInterval = null;
+          console.log('📸 Stopped polling');
+        }
+      }
+
+      updatePollingStatus(message) {
+        if (this.pollingStatus) {
+          this.pollingStatus.textContent = message;
+        }
+      }
+
+      // Slideshow Management
+      startSlideshow() {
+        if (this.photos.length === 0) return;
+        
+        console.log(`📸 Starting slideshow with ${this.photos.length} photos`);
+        
+        // Shuffle photos for variety
+        this.photos = this.shuffleArray([...this.photos]);
+        this.currentPhotoIndex = 0;
+        
+        this.showPhoto(0);
+        this.startAutoAdvance();
+      }
+
+      showPhoto(index) {
+        if (!this.photos || this.photos.length === 0) return;
+        
+        const photo = this.photos[index];
+        if (!photo) return;
+
+        console.log(`📸 Showing photo ${index + 1}/${this.photos.length}: ${photo.filename}`);
+        
+        // Update image
+        this.photoImage.src = photo.displayUrl || photo.baseUrl;
+        this.photoImage.alt = photo.filename || 'Photo';
+        
+        // Update info overlay
+        this.photoTitle.textContent = photo.filename || 'Untitled';
+        
+        const creationDate = photo.mediaMetadata?.creationTime 
+          ? new Date(photo.mediaMetadata.creationTime).toLocaleDateString()
+          : 'Unknown date';
+        
+        const dimensions = photo.mediaMetadata?.width && photo.mediaMetadata?.height
+          ? `${photo.mediaMetadata.width}×${photo.mediaMetadata.height}`
+          : '';
+        
+        this.photoDetails.textContent = `${creationDate}${dimensions ? ' • ' + dimensions : ''} • ${index + 1}/${this.photos.length}`;
+      }
+
+      nextPhoto() {
+        if (this.photos.length === 0) return;
+        
+        this.currentPhotoIndex = (this.currentPhotoIndex + 1) % this.photos.length;
+        this.showPhoto(this.currentPhotoIndex);
+        this.restartAutoAdvance();
+      }
+
+      prevPhoto() {
+        if (this.photos.length === 0) return;
+        
+        this.currentPhotoIndex = this.currentPhotoIndex === 0 
+          ? this.photos.length - 1 
+          : this.currentPhotoIndex - 1;
+        
+        this.showPhoto(this.currentPhotoIndex);
+        this.restartAutoAdvance();
+      }
+
+      togglePause() {
+        this.isPaused = !this.isPaused;
+        
+        if (this.isPaused) {
+          this.stopAutoAdvance();
+          console.log('📸 Slideshow paused');
+        } else {
+          this.startAutoAdvance();
+          console.log('📸 Slideshow resumed');
+        }
+      }
+
+      startAutoAdvance() {
+        if (this.isPaused) return;
+        
+        this.stopAutoAdvance();
+        this.autoAdvanceInterval = setInterval(() => {
+          this.nextPhoto();
+        }, this.transitionTime);
+      }
+
+      stopAutoAdvance() {
+        if (this.autoAdvanceInterval) {
+          clearInterval(this.autoAdvanceInterval);
+          this.autoAdvanceInterval = null;
+        }
+      }
+
+      stopSlideshow() {
+        this.stopAutoAdvance();
+      }
+
+      restartAutoAdvance() {
+        if (!this.isPaused) {
+          this.startAutoAdvance();
+        }
+      }
+
+      updateTransitionTime(newTime) {
+        this.transitionTime = newTime;
+        console.log(`📸 Updated transition time to ${newTime/1000}s`);
+        
+        if (!this.isPaused) {
+          this.startAutoAdvance();
+        }
+      }
+
+      // Utility Methods
+      shuffleArray(array) {
+        const shuffled = [...array];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+        return shuffled;
+      }
+
+      applyTheme(theme) {
+        const themeClass = `theme-${theme}`;
+        
+        document.documentElement.classList.remove('theme-dark', 'theme-light');
+        document.body.classList.remove('theme-dark', 'theme-light');
+        
+        document.documentElement.classList.add(themeClass);
+        document.body.classList.add(themeClass);
+        
+        console.log(`📸 Applied ${theme} theme`);
+      }
+    }
+
+    // Theme management
+    window.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'theme-change') {
+        const newTheme = event.data.theme;
+        // Theme is handled by the widget class
+      }
+    });
+    
+    // Request current theme from parent and send ready signal
+    window.addEventListener('load', () => {
+      if (window.parent !== window) {
+        window.parent.postMessage({ 
+          type: 'widget-request-theme',
+          widget: 'photos' 
+        }, '*');
+        
+        setTimeout(() => {
+          window.parent.postMessage({ 
+            type: 'widget-ready', 
+            widget: 'photos' 
+          }, '*');
+        }, 100);
+      }
+    });
+
+    // Initialize the photos picker widget
+    const photosWidget = new PhotosPickerWidget();
+
+    // Make navigation functions globally available
+    window.photoNextPhoto = () => photosWidget.nextPhoto();
+    window.photoPrevPhoto = () => photosWidget.prevPhoto();
+    window.photoTogglePause = () => photosWidget.togglePause();
+    window.photoStartSelection = () => photosWidget.startNewSelection();
+  </script>
+</body>
+</html>
