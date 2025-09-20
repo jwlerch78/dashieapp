@@ -1,10 +1,11 @@
 // js/auth/web-auth.js - Single OAuth-Only Web Auth (Complete Rewrite)
+// CHANGE SUMMARY: Fixed init() method to properly initialize web auth instead of containing AuthManager code
 
 export class WebAuth {
   constructor() {
     this.config = {
       client_id: '221142210647-58t8hr48rk7nlgl56j969himso1qjjoo.apps.googleusercontent.com',
-      // ✅ UPDATED: Add Google Photos and Calendar scopes
+      // Updated: Add Google Photos and Calendar scopes
       scope: 'profile email https://www.googleapis.com/auth/photoslibrary.readonly https://www.googleapis.com/auth/calendar.readonly',
       redirect_uri: window.location.origin + window.location.pathname
     };
@@ -13,24 +14,26 @@ export class WebAuth {
   }
 
   async init() {
+    console.log('🔐 Initializing Web Auth...');
+    
     try {
-      console.log('🔐 Initializing simplified web auth...');
+      // Set initialized flag
+      this.isInitialized = true;
       
-      // IMPORTANT: Check OAuth callback FIRST before doing anything else
+      // Check if we're returning from OAuth callback
       const callbackHandled = await this.handleOAuthCallback();
       
       if (callbackHandled) {
-        console.log('🔐 OAuth callback handled, skipping further initialization');
-      } else {
-        console.log('🔐 No OAuth callback detected, ready for sign-in');
+        console.log('🔐 OAuth callback was handled during init');
+        return;
       }
       
-      this.isInitialized = true;
-      console.log('🔐 Simplified web auth initialized');
+      console.log('🔐 ✅ Web auth initialized successfully');
       
     } catch (error) {
-      console.error('🔐 Web auth initialization failed:', error);
-      this.isInitialized = true; // Still mark as initialized to allow sign-in
+      console.error('🔐 ❌ Web auth initialization failed:', error);
+      this.isInitialized = true; // Still mark as initialized even if callback failed
+      throw error;
     }
   }
 
