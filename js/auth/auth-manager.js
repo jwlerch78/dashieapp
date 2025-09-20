@@ -1,28 +1,34 @@
-// js/auth/auth-manager.js
-// CHANGE SUMMARY: Fixed widget postMessage error by removing non-cloneable objects from message
+// js/auth/auth-manager.js - UPDATED: Complete auth manager with all missing functions restored
+// CHANGE SUMMARY: Restored all missing functions from working version including handleWebAuthResult, proper checkExistingAuth, centralized data system
 
-import { CognitoAuth } from './cognito-auth.js';
+import { NativeAuth } from './native-auth.js';
+import { WebAuth } from './web-auth.js';
 import { AuthUI } from './auth-ui.js';
 import { AuthStorage } from './auth-storage.js';
+import { DeviceFlowAuth } from './device-flow-auth.js';
 import { GoogleAPIClient } from '../google-apis/google-api-client.js';
-import { PickerSessionManager } from '../google-apis/picker-session-manager.js';
-
 
 export class AuthManager {
   constructor() {
     this.currentUser = null;
     this.isSignedIn = false;
+    this.isWebView = this.detectWebView();
+    this.hasNativeAuth = this.detectNativeAuth();
+    this.isFireTV = this.detectFireTV();
+    
+    // Initialize auth modules
+    this.storage = new AuthStorage();
+    this.ui = new AuthUI();
+    this.nativeAuth = this.hasNativeAuth ? new NativeAuth() : null;
+    this.webAuth = new WebAuth();
+    this.deviceFlowAuth = new DeviceFlowAuth();
+    
+    this.nativeAuthFailed = false;
+
     this.googleAccessToken = null;
     this.googleAPI = null;
-    this.pickerSessionManager = null;
-
     
-    // Initialize auth modules - much simpler now!
-    this.cognitoAuth = new CognitoAuth();
-    this.ui = new AuthUI();
-    this.storage = new AuthStorage(); // Keep for compatibility
-    
-    // Centralized data cache (unchanged)
+    // Centralized data cache and refresh system
     this.dataCache = {
       calendar: {
         events: [],
@@ -46,280 +52,477 @@ export class AuthManager {
     this.init();
   }
 
-  async init() {
-    console.log('🔐 Initializing simplified AuthManager with Cognito...');
+  detectWebView() {
+    const userAgent = navigator.userAgent;
+    const isAndroidWebView = /wv/.test(userAgent) || 
+                           /Android.*AppleWebKit(?!.*Chrome)/.test(userAgent) ||
+                           userAgent.includes('DashieApp');
+    const isIOSWebView = /(iPhone|iPod|iPad).*AppleWebKit(?!.*Safari)/.test(userAgent);
     
-    // Set up widget request handler (unchanged)
+    console.log('🔐 Environment detection:', {
+      userAgent: userAgent,
+      isAndroidWebView: isAndroidWebView,
+      isIOSWebView: isIOSWebView,
+      isWebView: isAndroidWebView || isIOSWebView
+    });
+    
+    return isAndroidWebView || isIOSWebView;
+  }
+
+  detectNativeAuth() {
+    const hasNative = window.DashieNative && 
+                     typeof window.DashieNative.signIn === 'function';
+    console.log('🔐 Native auth available:', hasNative);
+    return !!hasNative;
+  }
+
+  detectFireTV() {
+    const userAgent = navigator.userAgent;
+    const isFireTV = userAgent.includes('AFTS') || userAgent.includes('FireTV') || 
+                    userAgent.includes('AFT') || userAgent.includes('AFTMM') ||
+                    userAgent.includes('AFTRS') || userAgent.includes('AFTSS');
+    console.log('🔥 Fire TV detected:', isFireTV);
+    return isFireTV;
+  }
+
+  async init() {
+    console.log('🔐 Initializing AuthManager...');
+    console.log('🔐 Environment:', {
+      isWebView: this.isWebView,
+      hasNativeAuth: this.hasNativeAuth,
+      isFireTV: this.isFireTV
+    });
+
+    // Set up auth result handlers
+    window.handleNativeAuth = (result) => this.handleNativeAuthResult(result);
+    window.handleWebAuth = (result) => this.handleWebAuthResult(result);
+    
+    // Set up widget request handler
     this.setupWidgetRequestHandler();
     
-    try {
-      // Initialize Cognito
-      const result = await this.cognitoAuth.init();
-      
-      if (result.success && result.user) {
-        console.log('🔐 ✅ Cognito authentication successful');
-        this.setUserFromCognito(result.user);
-        this.isSignedIn = true;
-        this.ui.showSignedInState();
-        await this.initializeGoogleAPIs();
-        return;
-      }
-      
-      // No existing auth found - show sign-in prompt
-      console.log('🔐 No existing authentication, showing sign-in prompt');
-      this.ui.showSignInPrompt(() => this.signIn(), () => this.exitApp());
-      
-    } catch (error) {
-      console.error('🔐 ❌ Auth initialization failed:', error);
-      this.handleAuthFailure(error);
+    // Check for existing authentication first
+    this.checkExistingAuth();
+    
+    // If already signed in, we're done
+    if (this.isSignedIn) {
+      console.log('🔐 ✅ Already authenticated, initializing data services');
+      await this.initializeGoogleAPIs();
+      return;
     }
-  }
 
-  setUserFromCognito(userData) {
-    this.currentUser = userData;
-    this.googleAccessToken = userData.googleAccessToken;
-    
-    console.log('🔐 ✅ User set from Cognito:', {
-      name: userData.name,
-      email: userData.email,
-      picture: userData.picture,
-      firstname: userData.given_name,
-      lastname: userData.family_name,
-      id: userData.id,
-      hasGoogleToken: !!this.googleAccessToken
-    });
-    
-    // Save to legacy storage for compatibility
-    this.storage.saveUser(userData);
-  }
-
-  async signIn() {
-    try {
-      console.log('🔐 Starting Cognito sign-in...');
-      this.ui.hideSignInPrompt();
+    // Initialize appropriate auth method based on platform
+    if (this.hasNativeAuth) {
+      console.log('🔐 Using native Android authentication');
+      await this.nativeAuth.init();
+      this.checkNativeUser();
       
-      // This will redirect to Google OAuth
-      await this.cognitoAuth.signIn();
+    } else if (this.isWebView) {
+      console.log('🔐 WebView without native auth - showing WebView prompt');
+      this.ui.showWebViewAuthPrompt(() => this.createWebViewUser(), () => this.exitApp());
       
-    } catch (error) {
-      console.error('🔐 ❌ Sign-in failed:', error);
-      this.ui.showAuthError('Sign-in failed. Please try again.');
-    }
-  }
-
- // Updated cleanup method
-async signOut() {
-  console.log('Signing out...');
-  
-  try {
-    // Clear refresh timers
-    Object.values(this.refreshTimers).forEach(timer => clearTimeout(timer));
-    this.refreshTimers = {};
-    
-    // Clear data cache
-    this.dataCache = {
-      calendar: { events: [], calendars: [], lastUpdated: null, refreshInterval: 5 * 60 * 1000, isLoading: false },
-      photos: { albums: [], recentPhotos: [], lastUpdated: null, refreshInterval: 30 * 60 * 1000, isLoading: false }
-    };
-    
-    // Cleanup picker session manager
-    if (this.pickerSessionManager) {
-      this.pickerSessionManager.cleanup();
-      this.pickerSessionManager = null;
-    }
-    
-    // Sign out from Cognito
-    await this.cognitoAuth.signOut();
-    
-    // Clear local state
-    this.currentUser = null;
-    this.isSignedIn = false;
-    this.googleAccessToken = null;
-    this.googleAPI = null;
-    
-    // Clear legacy storage
-    this.storage.clearSavedUser();
-    
-    // Show sign-in prompt
-    this.ui.showSignInPrompt(() => this.signIn(), () => this.exitApp());
-    
-  } catch (error) {
-    console.error('Sign-out failed:', error);
-    // Still clear local state even if remote sign-out fails
-    this.currentUser = null;
-    this.isSignedIn = false;
-    this.googleAccessToken = null;
-    this.googleAPI = null;
-    if (this.pickerSessionManager) {
-      this.pickerSessionManager.cleanup();
-      this.pickerSessionManager = null;
-    }
-    this.ui.showSignInPrompt(() => this.signIn(), () => this.exitApp());
-  }
-}
-  exitApp() {
-    console.log('🚪 Exiting Dashie...');
-    
-    // Try platform-specific exit methods (legacy compatibility)
-    if (window.DashieNative?.exitApp) {
-      window.DashieNative.exitApp();
-    } else if (window.close) {
-      window.close();
     } else {
-      window.location.href = 'about:blank';
-    }
-  }
-
-  handleAuthFailure(error) {
-    console.error('🔐 Auth initialization failed:', error);
-    
-    // Try to get saved user as fallback
-    const savedUser = this.cognitoAuth.getSavedUser();
-    if (savedUser) {
-      console.log('🔐 Using saved user data as fallback');
-      this.setUserFromCognito(savedUser);
-      this.isSignedIn = true;
-      this.ui.showSignedInState();
-    } else {
-      this.ui.showAuthError('Authentication service is currently unavailable. Please try again.');
-    }
-  }
-
-  // API compatibility methods (unchanged from original)
-  getUser() {
-    return this.currentUser;
-  }
-
-  isAuthenticated() {
-    return this.isSignedIn && !!this.currentUser;
-  }
-
-  getGoogleAccessToken() {
-    return this.googleAccessToken;
-  }
-
-  // NEW: Method for token refresh (uses Cognito's built-in refresh)
-  async refreshGoogleAccessToken() {
-    try {
-      console.log('🔄 Refreshing Google access token via Cognito...');
-      const success = await this.cognitoAuth.refreshSession();
-      
-      if (success && this.cognitoAuth.getGoogleAccessToken()) {
-        this.googleAccessToken = this.cognitoAuth.getGoogleAccessToken();
+      console.log('🔐 Browser environment - initializing web auth');
+      try {
+        await this.webAuth.init();
         
-        // Update current user object
-        if (this.currentUser) {
-          this.currentUser.googleAccessToken = this.googleAccessToken;
-          this.storage.saveUser(this.currentUser);
+        if (this.isSignedIn) {
+          console.log('🔐 ✅ OAuth callback handled during init, user is now signed in');
+          return;
         }
         
-        console.log('🔄 ✅ Google access token refreshed successfully');
-        return this.googleAccessToken;
-      } else {
-        throw new Error('Cognito session refresh failed');
+        console.log('🔐 No existing auth found, showing sign-in prompt');
+        this.ui.showSignInPrompt(() => this.signIn(), () => this.exitApp());
+        
+      } catch (error) {
+        console.error('🔐 Web auth initialization failed:', error);
+        this.handleAuthFailure(error);
       }
-    } catch (error) {
-      console.error('🔄 ❌ Google access token refresh failed:', error);
-      throw error;
     }
   }
 
-  // Google APIs initialization (updated for Cognito)
-async initializeGoogleAPIs() {
-  if (!this.googleAccessToken) {
-    console.warn('No Google access token available for API initialization');
-    return;
-  }
-
-  try {
-    // Initialize Google API client (for Calendar)
-    this.googleAPI = new GoogleAPIClient(this);
-    
-    // Initialize Picker Session Manager (for Photos)
-    this.pickerSessionManager = new PickerSessionManager(this);
-    
-    // Set up picker callbacks
-    this.pickerSessionManager.setCallbacks({
-      onSessionCreated: (session) => {
-        console.log('Picker session created, notifying widgets...');
-        this.notifyWidgetsOfPickerSession(session);
-      },
-      onPhotosSelected: (photos) => {
-        console.log(`Photos selected (${photos.length}), updating widgets...`);
-        this.notifyWidgetsOfPhotosUpdate(photos);
-      },
-      onSelectionComplete: (result) => {
-        console.log('Album selection complete, refreshing photo widgets...');
-        this.notifyWidgetsOfSelectionComplete(result);
-      },
-      onError: (error) => {
-        console.error('Picker session error:', error);
-        this.notifyWidgetsOfPickerError(error);
-      }
-    });
-    
-    // Test API access
-    const testResults = await this.googleAPI.testAccess();
-    const pickerTest = await this.pickerSessionManager.testAccess();
-    
-    // Combine test results
-    const combinedResults = {
-      ...testResults,
-      picker: pickerTest.success,
-      photos: pickerTest.success // For compatibility
-    };
-    
-    console.log('Google APIs initialized:', combinedResults);
-    
-    // Notify widgets
-    this.notifyWidgetsOfAPIReadiness(combinedResults);
-    
-  } catch (error) {
-    console.error('Google APIs initialization failed:', error);
-    this.notifyWidgetsOfAPIReadiness({ calendar: false, photos: false, picker: false });
-  }
-}
-
-  // Widget communication methods (unchanged from original)
-  setupWidgetRequestHandler() {
-    
-    window.addEventListener('message', (event) => {
-        console.log('🔗 📨 PostMessages received:', {
-            type: event.data?.type,
-            origin: event.origin,
-            data: event.data
-          });
+  checkExistingAuth() {
+    const savedUser = this.storage.getSavedUser();
+    if (savedUser) {
+      console.log('🔐 Found saved user:', savedUser.name);
+      this.currentUser = savedUser;
+      this.isSignedIn = true;
       
-      if (event.data.type === 'widget-data-request') {
-        this.handleWidgetDataRequest(event.data, event.source);
-      }
-    });
-  }
-
-  notifyWidgetsOfAPIReadiness(testResults) {
-    setTimeout(() => {
-      const allWidgetIframes = document.querySelectorAll('.widget-iframe, .widget iframe, .widget-iframe');
-      
-      if (allWidgetIframes.length === 0) {
-        console.log('📡 🔄 No widget iframes found initially, retrying...');
-        setTimeout(() => {
-          const retryIframes = document.querySelectorAll('.widget-iframe, .widget iframe, .widget-iframe');
-          if (retryIframes.length > 0) {
-            console.log(`📡 🔄 Retry found ${retryIframes.length} widget iframe(s)`);
-            this.sendGoogleAPIReadyMessage(retryIframes, testResults);
-          }
-        }, 2000);
+      if (savedUser.googleAccessToken) {
+        this.googleAccessToken = savedUser.googleAccessToken;
+        console.log('🔐 ✅ Restored Google access token from saved user');
       } else {
-        this.sendGoogleAPIReadyMessage(allWidgetIframes, testResults);
+        console.warn('🔐 ⚠️ No Google access token in saved user data');
       }
-    }, 1000);
+      
+      this.ui.showSignedInState();
+    }
   }
 
+  // Widget request handler for centralized data
+  setupWidgetRequestHandler() {
+    window.addEventListener('message', (event) => {
+      if (!event.data || !event.data.type) return;
+      
+      switch (event.data.type) {
+        case 'request-calendar-data':
+          console.log('📅 Widget requesting calendar data:', event.data.widget);
+          this.handleCalendarDataRequest(event.source, event.data);
+          break;
+          
+        case 'request-photos-data':
+          console.log('📸 Widget requesting photos data:', event.data.widget);
+          this.handlePhotosDataRequest(event.source, event.data);
+          break;
+          
+        case 'refresh-calendar-data':
+          console.log('📅 Widget requesting calendar refresh:', event.data.widget);
+          this.refreshCalendarData(true);
+          break;
+          
+        case 'refresh-photos-data':
+          console.log('📸 Widget requesting photos refresh:', event.data.widget);
+          this.refreshPhotosData(true);
+          break;
+
+        case 'widget-data-request':
+          this.handleWidgetDataRequest(event.data, event.source);
+          break;
+      }
+    });
+  }
+
+  // Handle calendar data requests
+  async handleCalendarDataRequest(widgetWindow, requestData) {
+    const cacheData = this.dataCache.calendar;
+    
+    // Check if we have fresh data
+    const now = Date.now();
+    const isDataFresh = cacheData.lastUpdated && 
+                       (now - cacheData.lastUpdated) < cacheData.refreshInterval;
+    
+    if (isDataFresh && cacheData.events.length > 0) {
+      console.log('📅 Sending cached calendar data to widget');
+      this.sendCalendarDataToWidget(widgetWindow, cacheData);
+      return;
+    }
+    
+    // If data is stale or missing, queue the request and fetch fresh data
+    this.pendingWidgetRequests.push({
+      type: 'calendar',
+      window: widgetWindow,
+      requestData: requestData,
+      timestamp: now
+    });
+    
+    await this.refreshCalendarData();
+  }
+
+  // Handle photos data requests
+  async handlePhotosDataRequest(widgetWindow, requestData) {
+    const cacheData = this.dataCache.photos;
+    
+    // Check if we have fresh data
+    const now = Date.now();
+    const isDataFresh = cacheData.lastUpdated && 
+                       (now - cacheData.lastUpdated) < cacheData.refreshInterval;
+    
+    if (isDataFresh && (cacheData.albums.length > 0 || cacheData.recentPhotos.length > 0)) {
+      console.log('📸 Sending cached photos data to widget');
+      this.sendPhotosDataToWidget(widgetWindow, cacheData);
+      return;
+    }
+    
+    // If data is stale or missing, queue the request and fetch fresh data
+    this.pendingWidgetRequests.push({
+      type: 'photos',
+      window: widgetWindow,
+      requestData: requestData,
+      timestamp: now
+    });
+    
+    await this.refreshPhotosData();
+  }
+
+  // Refresh calendar data
+  async refreshCalendarData(forceRefresh = false) {
+    if (!this.googleAPI) {
+      console.warn('📅 ❌ No Google API client available for calendar refresh');
+      return;
+    }
+    
+    const cacheData = this.dataCache.calendar;
+    
+    // Prevent multiple simultaneous refreshes
+    if (cacheData.isLoading && !forceRefresh) {
+      console.log('📅 Calendar refresh already in progress');
+      return;
+    }
+    
+    cacheData.isLoading = true;
+    console.log('📅 🔄 Refreshing calendar data...');
+    
+    try {
+      const calendarData = await this.googleAPI.getAllCalendarEvents();
+      
+      // Update cache
+      cacheData.events = calendarData.events || [];
+      cacheData.calendars = calendarData.calendars || [];
+      cacheData.lastUpdated = Date.now();
+      cacheData.isLoading = false;
+      
+      console.log(`📅 ✅ Calendar data refreshed: ${cacheData.events.length} events, ${cacheData.calendars.length} calendars`);
+      
+      // Send data to pending widgets
+      this.processPendingRequests('calendar');
+      
+      // Set up auto-refresh
+      this.scheduleDataRefresh('calendar');
+      
+    } catch (error) {
+      console.error('📅 ❌ Calendar data refresh failed:', error);
+      cacheData.isLoading = false;
+      
+      // Send error to pending widgets
+      this.sendErrorToPendingWidgets('calendar', error.message);
+    }
+  }
+
+  // Refresh photos data
+  async refreshPhotosData(forceRefresh = false) {
+    if (!this.googleAPI) {
+      console.warn('📸 ❌ No Google API client available for photos refresh');
+      return;
+    }
+    
+    const cacheData = this.dataCache.photos;
+    
+    // Prevent multiple simultaneous refreshes
+    if (cacheData.isLoading && !forceRefresh) {
+      console.log('📸 Photos refresh already in progress');
+      return;
+    }
+    
+    cacheData.isLoading = true;
+    console.log('📸 🔄 Refreshing photos data...');
+    
+    try {
+      // Fetch both albums and recent photos
+      const [albums, recentPhotos] = await Promise.all([
+        this.googleAPI.getPhotoAlbums(),
+        this.googleAPI.getRecentPhotos(50)
+      ]);
+      
+      // Update cache
+      cacheData.albums = albums || [];
+      cacheData.recentPhotos = recentPhotos.photos || [];
+      cacheData.lastUpdated = Date.now();
+      cacheData.isLoading = false;
+      
+      console.log(`📸 ✅ Photos data refreshed: ${cacheData.albums.length} albums, ${cacheData.recentPhotos.length} recent photos`);
+      
+      // Send data to pending widgets
+      this.processPendingRequests('photos');
+      
+      // Set up auto-refresh
+      this.scheduleDataRefresh('photos');
+      
+    } catch (error) {
+      console.error('📸 ❌ Photos data refresh failed:', error);
+      cacheData.isLoading = false;
+      
+      // Send error to pending widgets
+      this.sendErrorToPendingWidgets('photos', error.message);
+    }
+  }
+
+  // Process pending widget requests
+  processPendingRequests(dataType) {
+    const pendingRequests = this.pendingWidgetRequests.filter(req => req.type === dataType);
+    
+    if (pendingRequests.length === 0) return;
+    
+    console.log(`📊 Processing ${pendingRequests.length} pending ${dataType} requests`);
+    
+    pendingRequests.forEach(request => {
+      if (dataType === 'calendar') {
+        this.sendCalendarDataToWidget(request.window, this.dataCache.calendar);
+      } else if (dataType === 'photos') {
+        this.sendPhotosDataToWidget(request.window, this.dataCache.photos);
+      }
+    });
+    
+    // Remove processed requests
+    this.pendingWidgetRequests = this.pendingWidgetRequests.filter(req => req.type !== dataType);
+  }
+
+  // Send calendar data to widget
+  sendCalendarDataToWidget(widgetWindow, cacheData) {
+    if (!widgetWindow) return;
+    
+    try {
+      widgetWindow.postMessage({
+        type: 'calendar-data-ready',
+        data: {
+          events: cacheData.events,
+          calendars: cacheData.calendars,
+          lastUpdated: cacheData.lastUpdated,
+          status: 'success'
+        },
+        timestamp: Date.now()
+      }, '*');
+      
+      console.log('📅 📤 Calendar data sent to widget');
+    } catch (error) {
+      console.error('📅 ❌ Failed to send calendar data to widget:', error);
+    }
+  }
+
+  // Send photos data to widget
+  sendPhotosDataToWidget(widgetWindow, cacheData) {
+    if (!widgetWindow) return;
+    
+    try {
+      widgetWindow.postMessage({
+        type: 'photos-data-ready',
+        data: {
+          albums: cacheData.albums,
+          recentPhotos: cacheData.recentPhotos,
+          lastUpdated: cacheData.lastUpdated,
+          status: 'success'
+        },
+        timestamp: Date.now()
+      }, '*');
+      
+      console.log('📸 📤 Photos data sent to widget');
+    } catch (error) {
+      console.error('📸 ❌ Failed to send photos data to widget:', error);
+    }
+  }
+
+  // Send errors to pending widgets
+  sendErrorToPendingWidgets(dataType, errorMessage) {
+    const pendingRequests = this.pendingWidgetRequests.filter(req => req.type === dataType);
+    
+    pendingRequests.forEach(request => {
+      try {
+        request.window.postMessage({
+          type: `${dataType}-data-ready`,
+          data: {
+            events: dataType === 'calendar' ? [] : undefined,
+            calendars: dataType === 'calendar' ? [] : undefined,
+            albums: dataType === 'photos' ? [] : undefined,
+            recentPhotos: dataType === 'photos' ? [] : undefined,
+            status: 'error',
+            error: errorMessage
+          },
+          timestamp: Date.now()
+        }, '*');
+      } catch (error) {
+        console.error(`Failed to send error to ${dataType} widget:`, error);
+      }
+    });
+    
+    // Remove error requests
+    this.pendingWidgetRequests = this.pendingWidgetRequests.filter(req => req.type !== dataType);
+  }
+
+  // Schedule automatic data refresh
+  scheduleDataRefresh(dataType) {
+    // Clear existing timer
+    if (this.refreshTimers[dataType]) {
+      clearTimeout(this.refreshTimers[dataType]);
+    }
+    
+    const refreshInterval = this.dataCache[dataType].refreshInterval;
+    
+    this.refreshTimers[dataType] = setTimeout(() => {
+      console.log(`⏰ Auto-refreshing ${dataType} data`);
+      if (dataType === 'calendar') {
+        this.refreshCalendarData();
+      } else if (dataType === 'photos') {
+        this.refreshPhotosData();
+      }
+    }, refreshInterval);
+    
+    console.log(`⏰ Scheduled ${dataType} refresh in ${Math.round(refreshInterval / 1000 / 60)} minutes`);
+  }
+
+  // Initialize Google APIs with immediate data fetching
+  async initializeGoogleAPIs() {
+    if (!this.googleAccessToken) {
+      console.warn('🔧 ⚠️ No Google access token available for API initialization');
+      return;
+    }
+
+    try {
+      console.log('🔧 Initializing Google API client...');
+      this.googleAPI = new GoogleAPIClient(this);
+      console.log('🔧 ✅ Google API client initialized');
+      
+      // Test API access first
+      setTimeout(async () => {
+        try {
+          console.log('🧪 Testing Google API access...');
+          const testResults = await this.googleAPI.testAccess();
+          console.log('🧪 ✅ Google API access test results:', testResults);
+          
+          // If calendar access is available, start fetching data
+          if (testResults.calendar) {
+            console.log('📅 🚀 Starting initial calendar data fetch...');
+            await this.refreshCalendarData();
+          }
+          
+          // If photos access is available, start fetching data
+          if (testResults.photos) {
+            console.log('📸 🚀 Starting initial photos data fetch...');
+            await this.refreshPhotosData();
+          }
+          
+          // Send capabilities to widgets (for backward compatibility)
+          this.notifyAllWidgets(testResults);
+          
+        } catch (error) {
+          console.warn('🧪 ❌ Google API access test failed:', error);
+          this.notifyAllWidgets({ 
+            calendar: false, 
+            photos: false, 
+            errors: [error.message],
+            tokenStatus: 'error'
+          });
+        }
+      }, 1000);
+      
+    } catch (error) {
+      console.error('🔧 ❌ Failed to initialize Google API client:', error);
+    }
+  }
+
+  // Send postMessage to ALL widget iframes (existing method - kept for compatibility)
+  notifyAllWidgets(testResults) {
+    const allWidgetIframes = document.querySelectorAll('.widget iframe, .widget-iframe');
+    
+    console.log(`📡 🖼️ Found ${allWidgetIframes.length} widget iframe(s) to notify`);
+    
+    if (allWidgetIframes.length === 0) {
+      console.warn('📡 ⚠️ No widget iframes found - they may not be loaded yet');
+      setTimeout(() => {
+        const retryIframes = document.querySelectorAll('.widget iframe, .widget-iframe');
+        if (retryIframes.length > 0) {
+          console.log(`📡 🔄 Retry found ${retryIframes.length} widget iframe(s)`);
+          this.sendGoogleAPIReadyMessage(retryIframes, testResults);
+        }
+      }, 2000);
+    } else {
+      this.sendGoogleAPIReadyMessage(allWidgetIframes, testResults);
+    }
+  }
+
+  // Helper method to send the actual postMessage (existing method - kept for compatibility)
   sendGoogleAPIReadyMessage(iframes, testResults) {
     iframes.forEach((iframe, index) => {
       if (iframe.contentWindow) {
         try {
-          // FIXED: Only send cloneable data - no Promise objects or functions
+          // Only send cloneable data - no Promise objects or functions
           const message = {
             type: 'google-apis-ready',
             apiCapabilities: testResults,
@@ -342,6 +545,250 @@ async initializeGoogleAPIs() {
     });
   }
 
+  // Existing auth methods continue...
+  checkNativeUser() {
+    if (this.nativeAuth) {
+      const userData = this.nativeAuth.getCurrentUser();
+      if (userData) {
+        this.setUserFromAuth(userData, 'native');
+        this.ui.showSignedInState();
+        console.log('🔐 Found native user:', this.currentUser.name);
+        return;
+      }
+    }
+    
+    this.ui.showSignInPrompt(() => this.signIn(), () => this.exitApp());
+  }
+
+  handleNativeAuthResult(result) {
+    console.log('🔐 Native auth result received:', result);
+    
+    if (result.success && result.user) {
+      this.setUserFromAuth(result.user, 'native', result.tokens);
+      this.isSignedIn = true;
+      this.storage.saveUser(this.currentUser);
+      this.ui.showSignedInState();
+      console.log('🔐 ✅ Native auth successful:', this.currentUser.name);
+    } else {
+      console.error('🔐 ❌ Native auth failed:', result.error);
+      this.nativeAuthFailed = true;
+      
+      if (this.isFireTV) {
+        console.log('🔥 Native auth failed on Fire TV, switching to Device Flow...');
+        this.startDeviceFlow();
+      } else if (result.error && result.error !== 'Sign-in was cancelled') {
+        this.ui.showAuthError(result.error || 'Native authentication failed');
+      }
+    }
+  }
+
+  async startDeviceFlow() {
+    try {
+      console.log('🔥 Starting Device Flow authentication...');
+      
+      this.ui.hideSignInPrompt();
+      
+      const result = await this.deviceFlowAuth.startDeviceFlow();
+      
+      if (result.success && result.user) {
+        this.setUserFromAuth(result.user, 'device_flow', result.tokens);
+        this.isSignedIn = true;
+        this.storage.saveUser(this.currentUser);
+        this.ui.showSignedInState();
+        console.log('🔥 ✅ Device Flow successful:', this.currentUser.name);
+      } else {
+        throw new Error('Device Flow was cancelled or failed');
+      }
+      
+    } catch (error) {
+      console.error('🔥 Device Flow failed:', error);
+      this.ui.showAuthError(`Authentication failed: ${error.message}. Please try again.`);
+    }
+  }
+
+  handleWebAuthResult(result) {
+    console.log('🔐 Web auth result received:', result);
+    
+    if (result.success && result.user) {
+      this.setUserFromAuth(result.user, 'web', result.tokens);
+      this.isSignedIn = true;
+      this.storage.saveUser(this.currentUser);
+      
+      console.log('🔐 🎯 Hiding sign-in UI and showing dashboard...');
+      this.ui.hideSignInPrompt();
+      this.ui.showSignedInState();
+      
+      console.log('🔐 ✅ Web auth successful:', this.currentUser.name);
+    } else {
+      console.error('🔐 ❌ Web auth failed:', result.error);
+      this.ui.showAuthError(result.error || 'Web authentication failed');
+    }
+  }
+  
+  async setUserFromAuth(userData, authMethod, tokens = null) {
+    let googleAccessToken = null;
+    
+    if (tokens && tokens.access_token) {
+      googleAccessToken = tokens.access_token;
+      console.log('🔐 ✅ Found Google access token from tokens object (', authMethod, ')');
+    } else if (userData.googleAccessToken) {
+      googleAccessToken = userData.googleAccessToken;
+      console.log('🔐 ✅ Found Google access token from user data (', authMethod, ')');
+    } else if (authMethod === 'web' && this.webAuth?.accessToken) {
+      googleAccessToken = this.webAuth.accessToken;
+      console.log('🔐 ✅ Found Google access token from web auth (', authMethod, ')');
+    } else {
+      console.warn('🔐 ⚠️ No Google access token found for', authMethod);
+    }
+
+    this.currentUser = {
+      id: userData.id,
+      name: userData.name,
+      email: userData.email,
+      picture: userData.picture,
+      signedInAt: Date.now(),
+      authMethod: authMethod,
+      googleAccessToken: googleAccessToken
+    };
+
+    this.googleAccessToken = googleAccessToken;
+
+    if (this.googleAccessToken) {
+      await this.initializeGoogleAPIs();
+    }
+
+    document.dispatchEvent(new CustomEvent('dashie-auth-ready'));
+  }
+  
+  createWebViewUser() {
+    console.log('🔐 Creating WebView user');
+    
+    this.currentUser = {
+      id: 'webview-user-' + Date.now(),
+      name: 'Dashie User',
+      email: 'user@dashie.app',
+      picture: 'icons/icon-profile-round.svg',
+      signedInAt: Date.now(),
+      authMethod: 'webview'
+    };
+    
+    this.isSignedIn = true;
+    this.storage.saveUser(this.currentUser);
+    this.ui.showSignedInState();
+    
+    console.log('🔐 WebView user created:', this.currentUser.name);
+  }
+
+  async signIn() {
+    console.log('🔐 Starting sign-in process...');
+    
+    if (this.isFireTV) {
+      if (this.hasNativeAuth && !this.nativeAuthFailed) {
+        console.log('🔥 Fire TV: Trying native auth first...');
+        this.nativeAuth.signIn();
+        
+        setTimeout(() => {
+          if (!this.isSignedIn && !this.nativeAuthFailed) {
+            console.log('🔥 Native auth timeout, switching to Device Flow...');
+            this.nativeAuthFailed = true;
+            this.startDeviceFlow();
+          }
+        }, 3000);
+      } else {
+        console.log('🔥 Fire TV: Using Device Flow directly...');
+        this.startDeviceFlow();
+      }
+      
+    } else if (this.hasNativeAuth && this.nativeAuth) {
+      console.log('🔐 Using native sign-in');
+      this.nativeAuth.signIn();
+      
+    } else if (this.webAuth) {
+      console.log('🔐 Using web sign-in');
+      try {
+        await this.webAuth.signIn();
+      } catch (error) {
+        console.error('🔐 Web sign-in failed:', error);
+        this.ui.showAuthError('Sign-in failed. Please try again.');
+      }
+    } else {
+      this.ui.showAuthError('No authentication method available.');
+    }
+  }
+
+  getGoogleAccessToken() {
+    return this.googleAccessToken;
+  }
+
+  signOut() {
+    console.log('🔐 Signing out...');
+    
+    // Clear refresh timers
+    Object.values(this.refreshTimers).forEach(timer => clearTimeout(timer));
+    this.refreshTimers = {};
+    
+    // Clear data cache
+    this.dataCache = {
+      calendar: { events: [], calendars: [], lastUpdated: null, refreshInterval: 5 * 60 * 1000, isLoading: false },
+      photos: { albums: [], recentPhotos: [], lastUpdated: null, refreshInterval: 30 * 60 * 1000, isLoading: false }
+    };
+    
+    if (this.hasNativeAuth && this.nativeAuth) {
+      this.nativeAuth.signOut();
+    }
+    
+    if (this.webAuth) {
+      this.webAuth.signOut();
+    }
+    
+    this.currentUser = null;
+    this.isSignedIn = false;
+    this.nativeAuthFailed = false;
+    this.googleAccessToken = null;
+    this.googleAPI = null;
+    this.storage.clearSavedUser();
+    
+    if (this.isWebView && !this.hasNativeAuth) {
+      this.ui.showWebViewAuthPrompt(() => this.createWebViewUser(), () => this.exitApp());
+    } else {
+      this.ui.showSignInPrompt(() => this.signIn(), () => this.exitApp());
+    }
+  }
+
+  exitApp() {
+    console.log('🚪 Exiting Dashie...');
+    
+    if (this.hasNativeAuth && window.DashieNative?.exitApp) {
+      window.DashieNative.exitApp();
+    } else if (window.close) {
+      window.close();
+    } else {
+      window.location.href = 'about:blank';
+    }
+  }
+
+  handleAuthFailure(error) {
+    console.error('🔐 Auth initialization failed:', error);
+    
+    const savedUser = this.storage.getSavedUser();
+    if (savedUser) {
+      console.log('🔐 Using saved authentication as fallback');
+      this.currentUser = savedUser;
+      this.isSignedIn = true;
+      this.ui.showSignedInState();
+    } else {
+      if (this.isFireTV) {
+        console.log('🔥 Auth failure on Fire TV, trying Device Flow...');
+        this.startDeviceFlow();
+      } else if (this.isWebView) {
+        this.ui.showWebViewAuthPrompt(() => this.createWebViewUser(), () => this.exitApp());
+      } else {
+        this.ui.showAuthError('Authentication service is currently unavailable.', true);
+      }
+    }
+  }
+  
+  // Widget data request handler (for backward compatibility)
   async handleWidgetDataRequest(requestData, sourceWindow) {
     console.log('📡 📨 Received widget data request:', requestData);
     
@@ -385,9 +832,15 @@ async initializeGoogleAPIs() {
     
     switch (requestType) {
       case 'events':
-        const events = await this.googleAPI.getAllCalendarEvents(params?.timeRange);
+        // Fetch both events and calendar metadata for color information
+        const [events, calendarList] = await Promise.all([
+          this.googleAPI.getAllCalendarEvents(params?.timeRange),
+          this.googleAPI.getCalendarList()
+        ]);
+        
         response.success = true;
         response.data = events;
+        response.calendars = calendarList; // Include calendar metadata with colors
         break;
         
       case 'calendars':
@@ -402,212 +855,73 @@ async initializeGoogleAPIs() {
     
     return response;
   }
-
-async handlePhotosRequest(requestType, params, response) {
-  if (!this.pickerSessionManager) {
-    throw new Error('Picker Session Manager not initialized');
-  }
   
-  console.log(`Handling photos request: ${requestType}`, params);
-  
-  switch (requestType) {
-    case 'status':
-      // Get current session and photo status
-      const sessionInfo = this.pickerSessionManager.getSessionInfo();
-      const sessionStatus = await this.pickerSessionManager.checkSessionStatus();
-      
-      response.success = true;
-      response.data = {
-        ...sessionInfo,
-        currentStatus: sessionStatus.status,
-        hasPhotos: sessionStatus.hasPhotos,
-        photoCount: sessionStatus.photoCount || sessionInfo.photoCount
-      };
-      console.log(`Photos status: ${sessionStatus.status}, photos: ${sessionStatus.hasPhotos}`);
-      break;
-      
-    case 'get-photos':
-      // Get current photos for display
-      if (this.pickerSessionManager.hasPhotos()) {
-        const photos = this.pickerSessionManager.getPhotos();
+  async handlePhotosRequest(requestType, params, response) {
+    if (!this.googleAPI) {
+      throw new Error('Google APIs not initialized');
+    }
+    
+    switch (requestType) {
+      case 'albums':
+        const albums = await this.googleAPI.getPhotoAlbums();
+        response.success = true;
+        response.data = albums;
+        break;
+        
+      case 'recent':
+        const photos = await this.googleAPI.getRecentPhotos(params?.count || 10);
         response.success = true;
         response.data = photos;
-        console.log(`Retrieved ${photos.length} photos for display`);
-      } else {
-        response.success = false;
-        response.error = 'No photos selected. User needs to select an album first.';
-        response.needsSelection = true;
-      }
-      break;
-      
-    case 'start-selection':
-      // Start new album selection flow
-      const selectionResult = await this.pickerSessionManager.startAlbumSelection();
-      
-      if (selectionResult.success) {
-        response.success = true;
-        response.data = {
-          sessionId: selectionResult.sessionId,
-          pickerUri: selectionResult.pickerUri,
-          qrCode: selectionResult.qrCode,
-          message: 'Album selection session created'
-        };
-        console.log(`Album selection started: ${selectionResult.sessionId}`);
-      } else {
-        response.success = false;
-        response.error = selectionResult.error;
-      }
-      break;
-      
-    case 'check-selection':
-      // Check if user has completed album selection
-      const checkResult = await this.pickerSessionManager.checkSessionStatus();
-      
-      response.success = true;
-      response.data = {
-        status: checkResult.status,
-        hasPhotos: checkResult.hasPhotos,
-        photoCount: checkResult.photoCount,
-        albumInfo: checkResult.albumInfo,
-        completed: checkResult.status === 'completed'
-      };
-      console.log(`Selection check: ${checkResult.status}`);
-      break;
-      
-    case 'clear-selection':
-      // Clear current selection and start fresh
-      const clearResult = await this.pickerSessionManager.clearAndSelectNew();
-      
-      if (clearResult.success) {
-        response.success = true;
-        response.data = {
-          sessionId: clearResult.sessionId,
-          pickerUri: clearResult.pickerUri,
-          qrCode: clearResult.qrCode,
-          message: 'Previous selection cleared, new session created'
-        };
-        console.log('Photos cleared and new selection started');
-      } else {
-        response.success = false;
-        response.error = clearResult.error;
-      }
-      break;
-      
-    case 'get-qr-code':
-      // Get QR code for current session (if any)
-      const qrCode = this.pickerSessionManager.getCurrentQRCode();
-      
-      if (qrCode) {
-        response.success = true;
-        response.data = qrCode;
-      } else {
-        response.success = false;
-        response.error = 'No active selection session';
-      }
-      break;
-      
-    case 'get-album-info':
-      // Get information about selected album
-      const albumInfo = this.pickerSessionManager.getAlbumInfo();
-      
-      response.success = true;
-      response.data = albumInfo;
-      break;
-      
-    case 'get-stats':
-      // Get stats for settings/debugging
-      const stats = this.pickerSessionManager.getStats();
-      
-      response.success = true;
-      response.data = stats;
-      break;
-      
-    default:
-      throw new Error(`Unknown photos request type: ${requestType}`);
+        break;
+        
+      default:
+        throw new Error(`Unknown photos request type: ${requestType}`);
+    }
+    
+    return response;
   }
-  
-  return response;
-}
-  
 
-// Notify widgets when picker session is created
-notifyWidgetsOfPickerSession(session) {
-  const allWidgetIframes = document.querySelectorAll('.widget-iframe, .widget iframe');
-  
-  allWidgetIframes.forEach((iframe) => {
-    if (iframe.contentWindow) {
-      try {
-        iframe.contentWindow.postMessage({
-          type: 'picker-session-created',
-          sessionId: session.sessionId,
-          pickerUri: session.pickerUri,
-          qrCode: this.pickerSessionManager.getCurrentQRCode(),
-          timestamp: Date.now()
-        }, '*');
-      } catch (error) {
-        console.error('Failed to notify widget of picker session:', error);
-      }
-    }
-  });
-}
+  // Public API
+  getUser() {
+    return this.currentUser;
+  }
 
-// Notify widgets when photos are updated
-notifyWidgetsOfPhotosUpdate(photos) {
-  const allWidgetIframes = document.querySelectorAll('.widget-iframe, .widget iframe');
-  
-  allWidgetIframes.forEach((iframe) => {
-    if (iframe.contentWindow) {
-      try {
-        iframe.contentWindow.postMessage({
-          type: 'photos-updated',
-          photos: photos,
-          photoCount: photos.length,
-          timestamp: Date.now()
-        }, '*');
-      } catch (error) {
-        console.error('Failed to notify widget of photos update:', error);
-      }
-    }
-  });
-}
+  isAuthenticated() {
+    return this.isSignedIn && this.currentUser !== null;
+  }
 
-// Notify widgets when selection is complete
-notifyWidgetsOfSelectionComplete(result) {
-  const allWidgetIframes = document.querySelectorAll('.widget-iframe, .widget iframe');
-  
-  allWidgetIframes.forEach((iframe) => {
-    if (iframe.contentWindow) {
-      try {
-        iframe.contentWindow.postMessage({
-          type: 'selection-complete',
-          photos: result.photos,
-          albumInfo: result.albumInfo,
-          photoCount: result.photos.length,
-          timestamp: Date.now()
-        }, '*');
-      } catch (error) {
-        console.error('Failed to notify widget of selection complete:', error);
-      }
+  // Public methods for manual data refresh
+  async refreshData(dataType = 'all') {
+    if (dataType === 'all' || dataType === 'calendar') {
+      await this.refreshCalendarData(true);
     }
-  });
-}
+    if (dataType === 'all' || dataType === 'photos') {
+      await this.refreshPhotosData(true);
+    }
+  }
 
-// Notify widgets of picker errors
-notifyWidgetsOfPickerError(error) {
-  const allWidgetIframes = document.querySelectorAll('.widget-iframe, .widget iframe');
-  
-  allWidgetIframes.forEach((iframe) => {
-    if (iframe.contentWindow) {
-      try {
-        iframe.contentWindow.postMessage({
-          type: 'picker-error',
-          error: error.message,
-          timestamp: Date.now()
-        }, '*');
-      } catch (error) {
-        console.error('Failed to notify widget of picker error:', error);
-      }
+  // Get cached data
+  getCachedData(dataType) {
+    if (dataType === 'calendar') {
+      return {
+        ...this.dataCache.calendar,
+        isStale: this.isDataStale('calendar')
+      };
+    } else if (dataType === 'photos') {
+      return {
+        ...this.dataCache.photos,
+        isStale: this.isDataStale('photos')
+      };
     }
-  });
-}
+    return null;
+  }
+
+  // Check if data is stale
+  isDataStale(dataType) {
+    const cacheData = this.dataCache[dataType];
+    if (!cacheData.lastUpdated) return true;
+    
+    const now = Date.now();
+    return (now - cacheData.lastUpdated) > cacheData.refreshInterval;
+  }
 }
